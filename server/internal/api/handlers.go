@@ -1,0 +1,428 @@
+package api
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
+
+	"github.com/skip2/go-qrcode"
+
+	"karaver/internal/room"
+)
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"publicUrl": s.cfg.PublicURL})
+}
+
+// handleSession validates a stored token or issues a new anonymous identity.
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token string `json:"token"`
+	}
+	_ = readJSON(r, &body)
+	if id, ok := s.lookupUser(body.Token); ok {
+		writeJSON(w, http.StatusOK, map[string]string{"userId": id, "token": body.Token})
+		return
+	}
+	id, token, err := s.createUser()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"userId": id, "token": token})
+}
+
+func (s *Server) handleSongs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	songs, more, err := s.lib.Search(q.Get("q"), limit, max(offset, 0))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": songs, "more": more})
+}
+
+func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt(r, "id")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	song, err := s.lib.Get(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	f, err := os.Open(filepath.Join(s.cfg.MediaDir, filepath.FromSlash(song.Path)))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	// ServeContent handles Range requests, so the browser streams and seeks without transcoding.
+	http.ServeContent(w, r, st.Name(), st.ModTime(), f)
+}
+
+// ---- room (members) ----
+
+func (s *Server) handleRoomInfo(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": rm.ID, "url": s.cfg.PublicURL + "/r/" + rm.ID})
+}
+
+func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	png, cached := s.qr.Load(rm.ID)
+	if !cached {
+		b, err := qrcode.Encode(s.cfg.PublicURL+"/r/"+rm.ID, qrcode.Medium, 512)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		png, _ = s.qr.LoadOrStore(rm.ID, b)
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(png.([]byte))
+}
+
+func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, ok := s.userID(r)
+	if !ok {
+		writeErr(w, room.ErrUnauthorized)
+		return
+	}
+	var body struct {
+		Nickname string `json:"nickname"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.Join(userID, body.Nickname); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleEnqueue(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, ok := s.userID(r)
+	if !ok {
+		writeErr(w, room.ErrUnauthorized)
+		return
+	}
+	var body struct {
+		SongID int64 `json:"songId"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.Enqueue(userID, body.SongID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, admin, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	itemID, err := pathInt(r, "item")
+	if err != nil {
+		writeErr(w, room.ErrInvalid)
+		return
+	}
+	if err := rm.Remove(itemID, userID, admin); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleSkip(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, admin, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		ItemID int64 `json:"itemId"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.Skip(body.ItemID, userID, admin); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleControl(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, admin, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Action string `json:"action"`
+		Value  int    `json:"value"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.Control(userID, admin, body.Action, body.Value); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handlePlayerEnded(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		PlayerSecret string `json:"playerSecret"`
+		ItemID       int64  `json:"itemId"`
+		Failed       bool   `json:"failed"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.PlayerEnded(body.PlayerSecret, body.ItemID, body.Failed); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleKickPlayer(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		PlayerID string `json:"playerId"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.KickPlayer(body.PlayerID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+// ---- admin ----
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !s.checkPassword(body.Password) {
+		time.Sleep(500 * time.Millisecond) // slow down guessing
+		writeErr(w, &room.Error{Status: http.StatusUnauthorized, Code: "wrong_password"})
+		return
+	}
+	s.setAdminCookie(w, r)
+	writeOK(w)
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	clearAdminCookie(w)
+	writeOK(w)
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"admin": s.isAdmin(r)})
+}
+
+func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.rooms.List())
+}
+
+func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	rm, err := s.rooms.Create(body.Name)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": rm.ID})
+}
+
+func (s *Server) handleUpdateRoom(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	var body room.Settings
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.UpdateSettings(body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
+	if err := s.rooms.Delete(r.PathValue("id")); err != nil {
+		writeErr(w, err)
+		return
+	}
+	s.qr.Delete(r.PathValue("id"))
+	writeOK(w)
+}
+
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	h, err := s.rooms.History(rm.ID, 100)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h)
+}
+
+func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		ItemID int64 `json:"itemId"`
+		Index  int   `json:"index"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.Move(body.ItemID, body.Index); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) userAction(fn func(rm *room.Room, userID string) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rm, ok := s.room(w, r)
+		if !ok {
+			return
+		}
+		var body struct {
+			UserID string `json:"userId"`
+		}
+		if err := readJSON(r, &body); err != nil {
+			writeErr(w, err)
+			return
+		}
+		if err := fn(rm, body.UserID); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeOK(w)
+	}
+}
+
+func (s *Server) handleKick(w http.ResponseWriter, r *http.Request) {
+	s.userAction((*room.Room).Kick)(w, r)
+}
+
+func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
+	s.userAction((*room.Room).Unban)(w, r)
+}
+
+func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	if err := rm.Clear(); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleLibraryStatus(w http.ResponseWriter, r *http.Request) {
+	scanning, last := s.lib.Status()
+	n, err := s.lib.Count()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scanning": scanning, "last": last, "songs": n})
+}
+
+func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
+	if !s.lib.StartScan() {
+		writeErr(w, &room.Error{Status: http.StatusConflict, Code: "scan_running"})
+		return
+	}
+	writeOK(w)
+}

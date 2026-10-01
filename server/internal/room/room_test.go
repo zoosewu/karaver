@@ -1,0 +1,371 @@
+package room
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"testing"
+
+	"karaver/internal/db"
+)
+
+func setup(t *testing.T) (*sql.DB, *Manager) {
+	t.Helper()
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	for i := 1; i <= 20; i++ {
+		if _, err := d.Exec(`INSERT INTO songs(id, path, title, artist, search, size, mtime) VALUES(?,?,?,?,?,0,0)`,
+			i, fmt.Sprintf("s%d.mp4", i), fmt.Sprintf("song%d", i), "artist", "x"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, u := range []string{"a", "b", "c"} {
+		if _, err := d.Exec(`INSERT INTO users(id, token_hash, created_at) VALUES(?,?,0)`, u, "h"+u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := NewManager(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d, m
+}
+
+func newTestRoom(t *testing.T, m *Manager, mode string) *Room {
+	t.Helper()
+	r, err := m.Create("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []string{"a", "b", "c"} {
+		if err := r.Join(u, "nick-"+u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.UpdateSettings(Settings{Name: "test", Mode: mode}); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func order(r *Room) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, it := range r.orderedLocked() {
+		out = append(out, fmt.Sprintf("%s%d", it.UserID, it.SongID))
+	}
+	return out
+}
+
+func current(r *Room) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.current == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s%d", r.current.UserID, r.current.SongID)
+}
+
+func mustEnqueue(t *testing.T, r *Room, user string, song int64) {
+	t.Helper()
+	if err := r.Enqueue(user, song); err != nil {
+		t.Fatalf("enqueue %s %d: %v", user, song, err)
+	}
+}
+
+func eq(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestFIFO(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	mustEnqueue(t, r, "a", 1) // starts playing immediately
+	mustEnqueue(t, r, "a", 2)
+	mustEnqueue(t, r, "a", 3)
+	mustEnqueue(t, r, "b", 4)
+	if current(r) != "a1" {
+		t.Fatalf("current = %s", current(r))
+	}
+	eq(t, order(r), "a2", "a3", "b4")
+}
+
+func TestRoundRobin(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeRoundRobin)
+	mustEnqueue(t, r, "a", 1) // a sings first
+	mustEnqueue(t, r, "a", 2)
+	mustEnqueue(t, r, "a", 3)
+	mustEnqueue(t, r, "b", 4)
+	mustEnqueue(t, r, "b", 5)
+	mustEnqueue(t, r, "c", 6)
+	// a just sang, so b and c (never sang) go first in each round.
+	eq(t, order(r), "b4", "c6", "a2", "b5", "a3")
+
+	finishCurrent(t, r)
+	if current(r) != "b4" {
+		t.Fatalf("current = %s", current(r))
+	}
+	eq(t, order(r), "c6", "a2", "b5", "a3")
+
+	// Whoever sang longest ago goes next.
+	finishCurrent(t, r) // c6 starts
+	eq(t, order(r), "a2", "b5", "a3")
+}
+
+func TestModeSwitchKeepsOrder(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeRoundRobin)
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "a", 2)
+	mustEnqueue(t, r, "a", 3)
+	mustEnqueue(t, r, "b", 4)
+	before := order(r)
+	if err := r.UpdateSettings(Settings{Name: "test", Mode: ModeFIFO}); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, order(r), before...)
+}
+
+func TestMoveRequiresFIFO(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeRoundRobin)
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "a", 2)
+	if err := r.Move(r.queue[0].ID, 0); !errors.Is(err, ErrReorderNeedsFIFO) {
+		t.Fatalf("err = %v", err)
+	}
+	r.UpdateSettings(Settings{Name: "test", Mode: ModeFIFO})
+	mustEnqueue(t, r, "b", 3)
+	mustEnqueue(t, r, "c", 4)
+	eq(t, order(r), "a2", "b3", "c4")
+	var c4 int64
+	for _, it := range r.queue {
+		if it.SongID == 4 {
+			c4 = it.ID
+		}
+	}
+	if err := r.Move(c4, 0); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, order(r), "c4", "a2", "b3")
+}
+
+func TestRules(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	mustEnqueue(t, r, "a", 1)
+	if err := r.Enqueue("b", 1); !errors.Is(err, ErrDuplicateSong) {
+		t.Fatalf("duplicate of current: %v", err)
+	}
+	mustEnqueue(t, r, "a", 2)
+	if err := r.Enqueue("b", 2); !errors.Is(err, ErrDuplicateSong) {
+		t.Fatalf("duplicate in queue: %v", err)
+	}
+	if err := r.Enqueue("zzz", 3); !errors.Is(err, ErrNotMember) {
+		t.Fatalf("non-member: %v", err)
+	}
+	if err := r.Enqueue("a", 999); !errors.Is(err, ErrSongNotFound) {
+		t.Fatalf("missing song: %v", err)
+	}
+
+	r.UpdateSettings(Settings{Name: "test", Mode: ModeFIFO, MaxPerUser: 2})
+	mustEnqueue(t, r, "a", 3)
+	if err := r.Enqueue("a", 4); !errors.Is(err, ErrQueueLimit) {
+		t.Fatalf("limit: %v", err)
+	}
+
+	if err := r.Join("b", "NICK-A"); !errors.Is(err, ErrNicknameTaken) {
+		t.Fatalf("nickname: %v", err)
+	}
+
+	// Only the requester or an admin may remove, and only the requester or admin may control.
+	id := r.queue[0].ID
+	if err := r.Remove(id, "b", false); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("remove other: %v", err)
+	}
+	if err := r.Control("b", false, "pause", 0); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("control other: %v", err)
+	}
+	if err := r.Control("a", false, "pause", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Remove(id, "a", false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Anyone may skip, but only the song that is actually playing.
+	cur := r.current.ID
+	if err := r.Skip(cur+1000, "b", false); !errors.Is(err, ErrNotCurrent) {
+		t.Fatalf("skip stale: %v", err)
+	}
+	if err := r.Skip(cur, "b", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Skip(cur, "c", false); !errors.Is(err, ErrNotCurrent) {
+		t.Fatalf("double skip: %v", err)
+	}
+}
+
+func TestKickAndReload(t *testing.T) {
+	d, m := setup(t)
+	r := newTestRoom(t, m, ModeRoundRobin)
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "b", 2)
+	mustEnqueue(t, r, "c", 3)
+	mustEnqueue(t, r, "c", 4)
+
+	c := NewClient(KindMember, "c")
+	if err := r.Attach(c); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Kick("c"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-c.Done:
+	default:
+		t.Fatal("kicked client not closed")
+	}
+	eq(t, order(r), "b2")
+	if err := r.Enqueue("c", 5); !errors.Is(err, ErrBanned) {
+		t.Fatalf("banned enqueue: %v", err)
+	}
+	if err := r.Attach(NewClient(KindMember, "c")); !errors.Is(err, ErrBanned) {
+		t.Fatalf("banned attach: %v", err)
+	}
+
+	// State survives a restart.
+	m2, err := NewManager(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, ok := m2.Get(r.ID)
+	if !ok {
+		t.Fatal("room not reloaded")
+	}
+	if current(r2) != "a1" {
+		t.Fatalf("reloaded current = %s", current(r2))
+	}
+	eq(t, order(r2), "b2")
+	if !r2.members["c"].Banned {
+		t.Fatal("ban not persisted")
+	}
+	mustEnqueue(t, r2, "a", 6)
+	eq(t, order(r2), "b2", "a6")
+}
+
+// finishCurrent reports the current song as ended from the active player,
+// connecting a player first if the room has none.
+func finishCurrent(t *testing.T, r *Room) {
+	t.Helper()
+	if r.activePlayer() == nil {
+		if err := r.Attach(NewPlayerClient("", "")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r.mu.Lock()
+	secret, id := r.players[0].PlayerSecret, r.current.ID
+	r.mu.Unlock()
+	if err := r.PlayerEnded(secret, id, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPlayerLine(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	p1 := NewPlayerClient("1.1.1.1", "")
+	p2 := NewPlayerClient("2.2.2.2", "")
+	p3 := NewPlayerClient("3.3.3.3", "")
+	for _, p := range []*Client{p1, p2, p3} {
+		if err := r.Attach(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r.activePlayer() != p1 {
+		t.Fatal("first player should be active")
+	}
+
+	// Only the active player may report the end of a song.
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "a", 2)
+	cur := r.current.ID
+	if err := r.PlayerEnded(p2.PlayerSecret, cur, false); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("waiting player ended: %v", err)
+	}
+	if err := r.PlayerEnded("", cur, false); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("empty secret ended: %v", err)
+	}
+	if current(r) != "a1" {
+		t.Fatalf("current changed to %s", current(r))
+	}
+
+	// Active player leaves: the next one in line takes over.
+	r.Detach(p1)
+	if r.activePlayer() != p2 {
+		t.Fatal("p2 should take over")
+	}
+	if err := r.PlayerEnded(p2.PlayerSecret, cur, false); err != nil {
+		t.Fatal(err)
+	}
+	if current(r) != "a2" {
+		t.Fatalf("current = %s", current(r))
+	}
+
+	// Admin kicks a waiting player, then the active one.
+	if err := r.KickPlayer(p3.PlayerID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p3.Done:
+	default:
+		t.Fatal("kicked player not closed")
+	}
+	if r.activePlayer() != p2 || len(r.players) != 1 {
+		t.Fatal("kicking a waiting player changed the active one")
+	}
+	if err := r.KickPlayer(p2.PlayerID); err != nil {
+		t.Fatal(err)
+	}
+	if r.activePlayer() != nil {
+		t.Fatal("no player should remain")
+	}
+	if err := r.KickPlayer(p2.PlayerID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("double kick: %v", err)
+	}
+	r.Detach(p2) // late detach after kick is a no-op
+}
+
+func TestPlayerSnapshotSelf(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	p1 := NewPlayerClient("", "")
+	p2 := NewPlayerClient("", "")
+	r.Attach(p1)
+	r.Attach(p2)
+	for i, p := range []*Client{p1, p2} {
+		var s struct {
+			Self    *selfView          `json:"self"`
+			Players []playerClientView `json:"players"`
+		}
+		if err := json.Unmarshal(<-p.Send, &s); err != nil {
+			t.Fatal(err)
+		}
+		if s.Self == nil || s.Self.Position != i || s.Self.Secret != p.PlayerSecret {
+			t.Fatalf("player %d self = %+v", i, s.Self)
+		}
+		if s.Players != nil {
+			t.Fatal("player list leaked to a player connection")
+		}
+	}
+}

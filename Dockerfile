@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+
+# Build stages run on the build machine's native platform and cross-compile,
+# so multi-arch images don't need QEMU emulation (the frontend is arch-independent,
+# and the Go binary is pure Go with CGO disabled).
+
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS server
+ARG TARGETOS TARGETARCH
+ARG VERSION=dev
+WORKDIR /src
+COPY server/go.mod server/go.sum ./
+RUN go mod download
+COPY server/ ./
+COPY --from=web /web/dist ./web/dist
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/karaver . \
+ && mkdir -p /out/data
+
+# distroless/static: no shell, no package manager, runs as uid 65532.
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=server /out/karaver /karaver
+COPY --from=server --chown=65532:65532 /out/data /data
+ENV LISTEN=:8080 DATA_DIR=/data MEDIA_DIR=/media
+EXPOSE 8080
+VOLUME /data
+ENTRYPOINT ["/karaver"]
