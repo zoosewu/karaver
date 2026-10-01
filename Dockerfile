@@ -20,14 +20,13 @@ RUN go mod download
 COPY server/ ./
 COPY --from=web /web/dist ./web/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/karaver . \
- && mkdir -p /out/data
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/karaver .
 
-# distroless/static: no shell, no package manager, runs as uid 65532.
-FROM gcr.io/distroless/static-debian12:nonroot
+# distroless/static: no shell, no package manager. Runs as root so a bind-mounted
+# ./data that Docker creates (root-owned) is writable; set `user:` in compose to
+# run as another uid if the directory is owned accordingly.
+FROM gcr.io/distroless/static-debian12
 COPY --from=server /out/karaver /karaver
-COPY --from=server --chown=65532:65532 /out/data /data
 ENV LISTEN=:8080 DATA_DIR=/data MEDIA_DIR=/media
 EXPOSE 8080
-VOLUME /data
 ENTRYPOINT ["/karaver"]

@@ -29,12 +29,20 @@ services:
       MEDIA_EXTENSIONS: .mp4
       GOMEMLIMIT: 64MiB
     volumes:
-      - karaver-data:/data
+      # 資料庫（房間、佇列、紀錄），會自動建立在 compose 檔旁邊
+      - ./data:/data
       # 改成你的：主機上的歌曲資料夾（唯讀掛載）
       - /path/to/karaoke:/media:ro
+```
 
-volumes:
-  karaver-data:
+容器預設用 root 執行，所以 Docker 自動建立的 `./data` 可以直接寫入。如果想改用一般使用者執行，先建好資料夾並設定擁有者，再加上 `user:`：
+
+```sh
+mkdir -p data && sudo chown 1000:1000 data
+```
+
+```yaml
+    user: "1000:1000"
 ```
 
 ```sh

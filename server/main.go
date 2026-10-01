@@ -32,7 +32,7 @@ func main() {
 
 	database, err := db.Open(filepath.Join(cfg.DataDir, "karaver.db"))
 	if err != nil {
-		log.Fatalf("database: %v", err)
+		log.Fatalf("database: %v (is %s writable by this container's user?)", err, cfg.DataDir)
 	}
 	defer database.Close()
 

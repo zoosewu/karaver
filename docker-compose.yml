@@ -13,8 +13,5 @@ services:
       MEDIA_EXTENSIONS: ${MEDIA_EXTENSIONS:-}
       GOMEMLIMIT: 64MiB
     volumes:
-      - karaver-data:/data
+      - ./data:/data
       - ${MEDIA_PATH:?set MEDIA_PATH in .env}:/media:ro
-
-volumes:
-  karaver-data:
