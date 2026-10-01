@@ -8,13 +8,45 @@
 
 ## 部署
 
-不需要原始碼，只要下載 `docker-compose.yml` 和 `.env.example` 兩個檔案：
+不需要原始碼。建立一個資料夾，放入下面這份 `docker-compose.yml`，把標示「改成你的」的三行改掉：
+
+```yaml
+services:
+  karaver:
+    image: ghcr.io/zoosewu/karaver:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # 改成你的：對外網址，QR code 會指向這裡（例如區網 IP 或反向代理後的網域）
+      PUBLIC_URL: http://192.168.1.10:8080
+      # 改成你的：管理頁密碼
+      ADMIN_PASSWORD: change-me
+      # 以下為選填，數值為預設值
+      FILENAME_FORMAT: artist-title   # artist-title / title-artist / title
+      FILENAME_SEPARATOR: " - "
+      ORIGINAL_SUFFIX: ""
+      MEDIA_EXTENSIONS: .mp4
+      GOMEMLIMIT: 64MiB
+    volumes:
+      - karaver-data:/data
+      # 改成你的：主機上的歌曲資料夾（唯讀掛載）
+      - /path/to/karaoke:/media:ro
+
+volumes:
+  karaver-data:
+```
 
 ```sh
-mkdir karaver && cd karaver
+docker compose up -d
+```
+
+如果比較想把設定放在 `.env`，也可以直接使用 repo 裡的 [`docker-compose.yml`](docker-compose.yml) 搭配 [`.env.example`](.env.example)：
+
+```sh
 curl -fsSLO https://raw.githubusercontent.com/zoosewu/karaver/main/docker-compose.yml
 curl -fsSL https://raw.githubusercontent.com/zoosewu/karaver/main/.env.example -o .env
-# 編輯 .env，填入 PUBLIC_URL、ADMIN_PASSWORD、MEDIA_PATH
+# 編輯 .env 後
 docker compose up -d
 ```
 
@@ -34,7 +66,7 @@ Image 放在 `ghcr.io/zoosewu/karaver`，支援 `linux/amd64` 和 `linux/arm64`�
 | `1.2.3`、`1.2`、`1` | 發行版（推送 `v1.2.3` 這種 git tag 時產生） |
 | `sha-abc1234` | 特定 commit |
 
-要固定版本時，在 `.env` 設定 `KARAVER_TAG=1.2.3`。
+要固定版本時，把 `image` 改成 `ghcr.io/zoosewu/karaver:1.2.3`；使用 `.env` 的話，則設定 `KARAVER_TAG=1.2.3`。
 
 如果想從原始碼自己建置：
 
@@ -42,14 +74,14 @@ Image 放在 `ghcr.io/zoosewu/karaver`，支援 `linux/amd64` 和 `linux/arm64`�
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-### 設定（`.env`）
+### 環境變數
 
 | 變數 | 說明 |
 |---|---|
 | `PUBLIC_URL` | 對外網址，QR code 會指向 `${PUBLIC_URL}/r/<房間代碼>`（必填） |
 | `ADMIN_PASSWORD` | 管理頁的密碼（必填） |
-| `MEDIA_PATH` | 主機上的歌曲資料夾，會以唯讀方式掛載（必填） |
-| `PORT` | 對外 port，預設 8080 |
+| `MEDIA_PATH` | 僅限 `.env` 版本：主機上的歌曲資料夾（必填） |
+| `PORT` | 僅限 `.env` 版本：對外 port，預設 8080 |
 | `FILENAME_FORMAT` | `artist-title`（預設）、`title-artist`、`title` |
 | `FILENAME_SEPARATOR` | 歌手和歌名之間的分隔字串，預設 `" - "`。找不到分隔字串時，整個檔名會當成歌名 |
 | `ORIGINAL_SUFFIX` | 預留給原唱版影片使用，見下方說明 |
