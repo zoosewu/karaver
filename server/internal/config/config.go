@@ -39,7 +39,7 @@ func Load() (*Config, error) {
 	if c.FilenameSeparator == "" {
 		c.FilenameSeparator = " - "
 	}
-	for _, e := range strings.Split(env("MEDIA_EXTENSIONS", ".mp4"), ",") {
+	for _, e := range strings.Split(env("MEDIA_EXTENSIONS", ".mp4,.m4v,.webm"), ",") {
 		e = strings.ToLower(strings.TrimSpace(e))
 		if e == "" {
 			continue

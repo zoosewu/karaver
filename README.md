@@ -26,7 +26,7 @@ services:
       FILENAME_FORMAT: artist-title   # artist-title / title-artist / title
       FILENAME_SEPARATOR: " - "
       ORIGINAL_SUFFIX: ""            # 例如 _original，啟用原唱切換（見「曲庫」）
-      MEDIA_EXTENSIONS: .mp4
+      MEDIA_EXTENSIONS: .mp4,.m4v,.webm
       GOMEMLIMIT: 64MiB
     volumes:
       # 資料庫（房間、佇列、紀錄），會自動建立在 compose 檔旁邊
@@ -93,16 +93,25 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 | `FILENAME_FORMAT` | `artist-title`（預設）、`title-artist`、`title` |
 | `FILENAME_SEPARATOR` | 歌手和歌名之間的分隔字串，預設 `" - "`。找不到分隔字串時，整個檔名會當成歌名 |
 | `ORIGINAL_SUFFIX` | 原唱版檔名的後綴，留空表示不啟用，見「曲庫」 |
-| `MEDIA_EXTENSIONS` | 要掃描的副檔名，預設 `.mp4` |
+| `MEDIA_EXTENSIONS` | 要掃描的副檔名，預設 `.mp4,.m4v,.webm`（瀏覽器普遍能播的格式），見「曲庫」 |
 
 用反向代理（Caddy、Nginx、Traefik）提供 HTTPS 時，`PUBLIC_URL` 要填代理後的網址。代理需要支援 WebSocket（路徑 `/api/rooms/*/ws`）。
 
 Image 內建健康檢查（`/healthz`，同時檢查資料庫連線），`docker ps` 會顯示 `healthy` 或 `unhealthy`。
 
+需要進容器查看狀況時（image 以 Alpine 為基底）：
+
+```sh
+docker compose exec karaver sh
+# 例如：ls /media、ls -la /data，或 apk add sqlite 後執行 sqlite3 /data/karaver.db
+```
+
 ### 曲庫
 
 - 容器啟動時會自動掃描一次，之後新增檔案請到管理頁按「重新掃描」。
-- 資料夾結構不影響分類，只會解析檔名。
+- 會掃描所有子資料夾，但資料夾結構不影響分類，只會解析檔名。名稱以 `.` 開頭的檔案和資料夾會被略過。
+- **符號連結**：會跟隨指向檔案和資料夾的符號連結。循環連結不會造成無限掃描；兩個連結指向同一個資料夾時，只會列出一次。注意容器只看得到有掛載進去的路徑，連結的目標必須也在容器內：建議在歌曲資料夾裡使用**相對路徑**的連結，或者把連結目標用相同的絕對路徑一起掛載進容器（例如 `- /mnt/nas:/mnt/nas:ro`）。
+- **副檔名**：系統不轉檔，影片直接交給瀏覽器播放，所以只列出瀏覽器普遍能播的 `.mp4`、`.m4v`、`.webm`。如果你的播放端瀏覽器能播 `.mkv`，可以用 `MEDIA_EXTENSIONS=.mp4,.m4v,.webm,.mkv` 加進來。副檔名只是初步篩選，例如 H.265 編碼的 `.mp4` 在部分瀏覽器上還是播不了，播不了的歌會自動跳過。
 - 影片會以 HTTP Range 直接串流原始檔，不轉檔。請使用瀏覽器能播放的 H.264/AAC 格式；H.265 在部分瀏覽器上無法播放。
 - **原唱／伴唱切換**：設定 `ORIGINAL_SUFFIX=_original` 後，`周杰倫 - 晴天_original.mp4` 不會出現在歌單裡，而是成為 `周杰倫 - 晴天.mp4` 的原唱版。播放這首歌時，點歌者或管理員可以在手機上切換成「原唱」：畫面維持伴唱影片，聲音改用原唱檔的音軌，兩者會持續對時（誤差超過 0.3 秒就自動校正）。**兩個檔案的時間軸必須一致**，否則歌詞和歌聲會對不上。每首歌開始時都會回到伴唱。
 
@@ -149,7 +158,7 @@ cd server && go test ./...
 cd web && npm run check
 ```
 
-架構：Go（`net/http`、`coder/websocket`、純 Go 的 SQLite）+ Svelte 5，前端打包後嵌入 Go 執行檔，最終產出單一 distroless image。房間狀態放在記憶體中，同時寫入 SQLite；有變動時透過 WebSocket 推送完整快照給所有連線。
+架構：Go（`net/http`、`coder/websocket`、純 Go 的 SQLite）+ Svelte 5，前端打包後嵌入 Go 執行檔，最終產出約 30 MB 的 Alpine image。房間狀態放在記憶體中，同時寫入 SQLite；有變動時透過 WebSocket 推送完整快照給所有連線。
 
 介面文字放在 `web/src/lib/locales/`。要新增語言，複製 `zh-TW.ts` 後在 `web/src/lib/i18n.ts` 註冊即可。
 

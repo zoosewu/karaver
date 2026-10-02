@@ -214,3 +214,61 @@ func TestFavorites(t *testing.T) {
 		t.Fatalf("after delete = %v", favs)
 	}
 }
+
+func TestScanFollowsSymlinks(t *testing.T) {
+	l, media := newLib(t, config.Config{})
+	outside := t.TempDir() // a library that lives outside MEDIA_DIR, linked in
+	touch(t, outside, "Jay/周杰倫 - 晴天.mp4")
+	touch(t, outside, "single/A - linked file.mp4")
+	touch(t, media, "local/B - local.mp4")
+
+	links := map[string]string{
+		"linked-dir":        filepath.Join(outside, "Jay"),                           // link to a directory
+		"C - file link.mp4": filepath.Join(outside, "single", "A - linked file.mp4"), // link to a file
+		"local/loop":        "..",                                                    // cycle back to the root
+		"local/again":       ".",                                                     // cycle to itself
+		"dup-a":             filepath.Join(outside, "Jay"),                           // two links, same folder
+		"broken.mp4":        filepath.Join(outside, "missing.mp4"),                   // dangling link
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(media, filepath.FromSlash(name))); err != nil {
+			t.Skipf("symlinks not supported here: %v", err)
+		}
+	}
+
+	res := scan(t, l)
+	if res.Total != 3 {
+		t.Fatalf("total = %d (%+v), want 3: the Jay folder once, the file link, the local song", res.Total, res)
+	}
+	got := titles(t, l, "")
+	want := []string{"B|local", "C|file link", "周杰倫|晴天"}
+	if len(got) != len(want) {
+		t.Fatalf("songs = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("songs = %v, want %v", got, want)
+		}
+	}
+
+	// Files found through a link are served through the same relative path.
+	songs, _, _ := l.Search("晴天", 1, 0)
+	s, err := l.Get(songs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(media, filepath.FromSlash(s.Path)))
+	if err != nil || string(b) != "Jay/周杰倫 - 晴天.mp4" {
+		t.Fatalf("read via %q: %q, %v", s.Path, b, err)
+	}
+}
+
+func TestDefaultExtensions(t *testing.T) {
+	l, media := newLib(t, config.Config{Extensions: []string{".mp4", ".m4v", ".webm"}})
+	for _, f := range []string{"A - a.mp4", "B - b.M4V", "C - c.webm", "D - d.mkv", "E - e.avi"} {
+		touch(t, media, f)
+	}
+	if res := scan(t, l); res.Total != 3 {
+		t.Fatalf("total = %d, want 3 (mp4, m4v, webm)", res.Total)
+	}
+}

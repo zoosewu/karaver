@@ -22,12 +22,13 @@ COPY --from=web /web/dist ./web/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/karaver .
 
-# distroless/static: no shell, no package manager. Runs as root so a bind-mounted
-# ./data that Docker creates (root-owned) is writable; set `user:` in compose to
-# run as another uid if the directory is owned accordingly.
-FROM gcr.io/distroless/static-debian12
-COPY --from=server /out/karaver /karaver
+# Alpine keeps the image small but still has a shell and busybox tools for
+# troubleshooting (`docker compose exec karaver sh`; `apk add sqlite` to inspect the DB).
+# Runs as root so a bind-mounted ./data that Docker creates (root-owned) is writable;
+# set `user:` in compose to run as another uid if the directory is owned accordingly.
+FROM alpine:3.22
+COPY --from=server /out/karaver /usr/local/bin/karaver
 ENV LISTEN=:8080 DATA_DIR=/data MEDIA_DIR=/media
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/karaver", "healthcheck"]
-ENTRYPOINT ["/karaver"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["karaver", "healthcheck"]
+ENTRYPOINT ["karaver"]

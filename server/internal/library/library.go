@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"log"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -101,39 +102,16 @@ func (l *Library) scan() Result {
 	root := l.cfg.MediaDir
 	files := map[string]fileInfo{}
 	originals := map[string]string{} // song stem (rel path without ext) -> original rel path
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if p == root {
-				return err
-			}
-			return nil // skip unreadable entries
+	err := walkFollowingLinks(root, func(rel string, info fs.FileInfo) {
+		if !slices.Contains(l.cfg.Extensions, strings.ToLower(path.Ext(rel))) {
+			return
 		}
-		name := d.Name()
-		if d.IsDir() {
-			if p != root && strings.HasPrefix(name, ".") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if strings.HasPrefix(name, ".") || !slices.Contains(l.cfg.Extensions, strings.ToLower(filepath.Ext(name))) {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
 		stem := strings.TrimSuffix(rel, path.Ext(rel))
 		if suf := l.cfg.OriginalSuffix; suf != "" && strings.HasSuffix(stem, suf) {
 			originals[strings.TrimSuffix(stem, suf)] = rel
-			return nil
+			return
 		}
 		files[rel] = fileInfo{size: info.Size(), mtime: info.ModTime().Unix()}
-		return nil
 	})
 	if err != nil {
 		res.Error = err.Error()
@@ -206,6 +184,49 @@ func (l *Library) scan() Result {
 	}
 	res.Total = len(files)
 	return finish()
+}
+
+// walkFollowingLinks calls visit for every regular file under root (paths are
+// slash-separated and relative to root). Unlike filepath.WalkDir it follows
+// symbolic links to files and directories. Each real directory is visited once,
+// which both breaks symlink cycles and avoids listing a folder twice when two
+// links point at it. Hidden entries (".name"), broken links and unreadable
+// directories are skipped.
+func walkFollowingLinks(root string, visit func(rel string, info fs.FileInfo)) error {
+	if _, err := os.Stat(root); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	var walk func(abs, rel string)
+	walk = func(abs, rel string) {
+		real, err := filepath.EvalSymlinks(abs)
+		if err != nil || seen[real] {
+			return
+		}
+		seen[real] = true
+		entries, err := os.ReadDir(abs) // sorted by name, so the walk is deterministic
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			p, r := filepath.Join(abs, name), path.Join(rel, name)
+			info, err := os.Stat(p) // follows links
+			if err != nil {
+				continue
+			}
+			if info.IsDir() {
+				walk(p, r)
+			} else if info.Mode().IsRegular() {
+				visit(r, info)
+			}
+		}
+	}
+	walk(root, "")
+	return nil
 }
 
 func (l *Library) parse(stem string) (artist, title string) {
