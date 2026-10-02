@@ -24,6 +24,8 @@ type Item struct {
 	Position  int64
 	CreatedAt int64
 	StartedAt int64
+	// HasOriginal: an original-vocal companion file exists for this song.
+	HasOriginal bool
 }
 
 type Member struct {
@@ -51,6 +53,7 @@ type Room struct {
 	volume       int
 	paused       bool
 	restartNonce int64
+	vocal        bool // play the original-vocal audio over the karaoke video; reset per song
 	current      *Item
 	queue        []*Item // unordered; see orderedLocked
 	members      map[string]*Member
@@ -158,6 +161,7 @@ func (r *Room) finishLocked(status string) {
 	_ = r.exec(`UPDATE queue_items SET status=?, ended_at=? WHERE id=?`, status, now(), r.current.ID)
 	r.current = nil
 	r.paused = false
+	r.vocal = false
 }
 
 func (r *Room) advanceLocked() {
@@ -178,6 +182,7 @@ func (r *Room) advanceLocked() {
 	r.lastSung[next.UserID] = t
 	r.current = next
 	r.paused = false
+	r.vocal = false
 }
 
 // ---- subscribers ----
@@ -283,6 +288,17 @@ func (r *Room) Join(userID, nickname string) error {
 	return nil
 }
 
+// Nickname returns the member's nickname in this room, which also identifies
+// their favorites across rooms and devices.
+func (r *Room) Nickname(userID string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.checkMemberLocked(userID); err != nil {
+		return "", err
+	}
+	return r.members[userID].Nickname, nil
+}
+
 func (r *Room) checkMemberLocked(userID string) error {
 	mem, ok := r.members[userID]
 	if !ok {
@@ -295,7 +311,7 @@ func (r *Room) checkMemberLocked(userID string) error {
 }
 
 func (r *Room) Enqueue(userID string, songID int64) error {
-	title, artist, err := r.m.songInfo(songID)
+	song, err := r.m.songInfo(songID)
 	if err != nil {
 		return err
 	}
@@ -322,7 +338,8 @@ func (r *Room) Enqueue(userID string, songID int64) error {
 	if r.settings.MaxPerUser > 0 && mine >= r.settings.MaxPerUser {
 		return ErrQueueLimit
 	}
-	it := &Item{SongID: songID, Title: title, Artist: artist, UserID: userID, Position: r.nextPos, CreatedAt: now()}
+	it := &song
+	it.UserID, it.Position, it.CreatedAt = userID, r.nextPos, now()
 	res, err := r.m.db.Exec(`INSERT INTO queue_items(room_id, song_id, user_id, status, position, created_at) VALUES(?,?,?,'queued',?,?)`,
 		r.ID, songID, userID, it.Position, it.CreatedAt)
 	if err != nil {
@@ -420,6 +437,11 @@ func (r *Room) Control(userID string, admin bool, action string, value int) erro
 		if err := r.exec(`UPDATE rooms SET volume=? WHERE id=?`, r.volume, r.ID); err != nil {
 			return err
 		}
+	case "vocal":
+		if r.current == nil || !r.current.HasOriginal {
+			return ErrNoOriginal
+		}
+		r.vocal = value != 0
 	case "qr":
 		r.showQR = value != 0
 		if err := r.exec(`UPDATE rooms SET show_qr=? WHERE id=?`, r.showQR, r.ID); err != nil {
@@ -574,12 +596,13 @@ func (r *Room) sweepIdle() {
 // ---- snapshots ----
 
 type itemView struct {
-	ID       int64  `json:"id"`
-	SongID   int64  `json:"songId"`
-	Title    string `json:"title"`
-	Artist   string `json:"artist"`
-	UserID   string `json:"userId"`
-	Nickname string `json:"nickname"`
+	ID          int64  `json:"id"`
+	SongID      int64  `json:"songId"`
+	Title       string `json:"title"`
+	Artist      string `json:"artist"`
+	UserID      string `json:"userId"`
+	Nickname    string `json:"nickname"`
+	HasOriginal bool   `json:"hasOriginal"`
 }
 
 type memberView struct {
@@ -595,6 +618,7 @@ type playerView struct {
 	Volume       int   `json:"volume"`
 	ShowQR       bool  `json:"showQR"`
 	RestartNonce int64 `json:"restartNonce"`
+	Vocal        bool  `json:"vocal"`
 }
 
 // playerClientView lists a player connection for admins.
@@ -631,7 +655,7 @@ func message(typ string) []byte {
 }
 
 func (r *Room) viewItem(it *Item) itemView {
-	v := itemView{ID: it.ID, SongID: it.SongID, Title: it.Title, Artist: it.Artist, UserID: it.UserID}
+	v := itemView{ID: it.ID, SongID: it.SongID, Title: it.Title, Artist: it.Artist, UserID: it.UserID, HasOriginal: it.HasOriginal}
 	if mem, ok := r.members[it.UserID]; ok {
 		v.Nickname = mem.Nickname
 	}
@@ -653,7 +677,7 @@ func (r *Room) viewLocked(admin bool) stateView {
 		Members:  []memberView{},
 		Player: playerView{
 			Online: len(r.players) > 0, Paused: r.paused, Volume: r.volume,
-			ShowQR: r.showQR, RestartNonce: r.restartNonce,
+			ShowQR: r.showQR, RestartNonce: r.restartNonce, Vocal: r.vocal,
 		},
 	}
 	if r.current != nil {

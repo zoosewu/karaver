@@ -44,7 +44,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/config", s.handleConfig)
 	mux.HandleFunc("POST /api/session", s.handleSession)
 	mux.HandleFunc("GET /api/songs", s.handleSongs)
+	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /media/{id}", s.handleMedia)
+	mux.HandleFunc("GET /media/{id}/original", s.handleOriginal)
 
 	mux.HandleFunc("GET /api/rooms/{id}", s.handleRoomInfo)
 	mux.HandleFunc("GET /api/rooms/{id}/qr.png", s.handleQR)
@@ -54,6 +56,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/rooms/{id}/queue/{item}", s.handleRemove)
 	mux.HandleFunc("POST /api/rooms/{id}/skip", s.handleSkip)
 	mux.HandleFunc("POST /api/rooms/{id}/control", s.handleControl)
+	mux.HandleFunc("GET /api/rooms/{id}/favorites", s.handleFavorites)
+	mux.HandleFunc("PUT /api/rooms/{id}/favorites/{song}", s.handleAddFavorite)
+	mux.HandleFunc("DELETE /api/rooms/{id}/favorites/{song}", s.handleRemoveFavorite)
 
 	mux.HandleFunc("GET /api/rooms/{id}/player/ws", s.handlePlayerWS)
 	mux.HandleFunc("POST /api/rooms/{id}/player/ended", s.handlePlayerEnded)

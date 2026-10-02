@@ -369,3 +369,33 @@ func TestPlayerSnapshotSelf(t *testing.T) {
 		}
 	}
 }
+
+func TestVocalToggle(t *testing.T) {
+	d, m := setup(t)
+	if _, err := d.Exec(`UPDATE songs SET original_path='s1_original.mp4' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	r := newTestRoom(t, m, ModeFIFO)
+	if err := r.Control("a", false, "vocal", 1); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("nothing playing: %v", err)
+	}
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "b", 2)
+	if !r.current.HasOriginal {
+		t.Fatal("HasOriginal not loaded")
+	}
+	if err := r.Control("b", false, "vocal", 1); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("other member: %v", err)
+	}
+	if err := r.Control("a", false, "vocal", 1); err != nil || !r.vocal {
+		t.Fatalf("vocal on: %v %v", err, r.vocal)
+	}
+	// The next song starts as backing track again, and has no original to switch to.
+	finishCurrent(t, r)
+	if r.vocal {
+		t.Fatal("vocal not reset for the next song")
+	}
+	if err := r.Control("b", false, "vocal", 1); !errors.Is(err, ErrNoOriginal) {
+		t.Fatalf("song without original: %v", err)
+	}
+}

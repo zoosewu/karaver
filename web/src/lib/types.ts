@@ -13,6 +13,8 @@ export interface QueueItem {
   artist: string
   userId: string
   nickname: string
+  /** An original-vocal version exists, so the requester can switch to it. */
+  hasOriginal: boolean
 }
 
 export interface RoomSettings {
@@ -41,6 +43,8 @@ export interface RoomState {
     volume: number
     showQR: boolean
     restartNonce: number
+    /** true = original vocals (karaoke video + original audio) */
+    vocal: boolean
   }
   members: Member[]
   /** Admin connections only: every connected player, active one first. */

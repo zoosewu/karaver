@@ -76,7 +76,7 @@ func NewManager(d *sql.DB) (*Manager, error) {
 	}
 	rows.Close()
 
-	rows, err = d.Query(`SELECT q.id, q.room_id, q.song_id, q.user_id, q.status, q.position, q.created_at, COALESCE(q.started_at, 0), s.title, s.artist
+	rows, err = d.Query(`SELECT q.id, q.room_id, q.song_id, q.user_id, q.status, q.position, q.created_at, COALESCE(q.started_at, 0), s.title, s.artist, s.original_path != ''
 		FROM queue_items q JOIN songs s ON s.id = q.song_id
 		WHERE q.status IN ('queued', 'playing')`)
 	if err != nil {
@@ -85,7 +85,7 @@ func NewManager(d *sql.DB) (*Manager, error) {
 	for rows.Next() {
 		var roomID, status string
 		it := &Item{}
-		if err := rows.Scan(&it.ID, &roomID, &it.SongID, &it.UserID, &status, &it.Position, &it.CreatedAt, &it.StartedAt, &it.Title, &it.Artist); err != nil {
+		if err := rows.Scan(&it.ID, &roomID, &it.SongID, &it.UserID, &status, &it.Position, &it.CreatedAt, &it.StartedAt, &it.Title, &it.Artist, &it.HasOriginal); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -225,16 +225,18 @@ func (m *Manager) RunIdleSweeper(ctx context.Context) {
 	}
 }
 
-func (m *Manager) songInfo(id int64) (title, artist string, err error) {
-	err = m.db.QueryRow(`SELECT title, artist FROM songs WHERE id=? AND present=1`, id).Scan(&title, &artist)
+func (m *Manager) songInfo(id int64) (it Item, err error) {
+	it.SongID = id
+	err = m.db.QueryRow(`SELECT title, artist, original_path != '' FROM songs WHERE id=? AND present=1`, id).
+		Scan(&it.Title, &it.Artist, &it.HasOriginal)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", ErrSongNotFound
+		return it, ErrSongNotFound
 	}
 	if err != nil {
 		log.Printf("song lookup: %v", err)
-		return "", "", ErrInternal
+		return it, ErrInternal
 	}
-	return title, artist, nil
+	return it, nil
 }
 
 const roomIDAlphabet = "abcdefghjkmnpqrstuvwxyz23456789"

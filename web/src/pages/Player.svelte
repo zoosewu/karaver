@@ -9,12 +9,14 @@
   let { roomId }: { roomId: string } = $props()
 
   const INTRO_MS = 5000
+  const MAX_DRIFT_S = 0.3
 
-  type Phase = 'checking' | 'start' | 'playing' | 'kicked' | 'notFound'
+  type Phase = 'checking' | 'playing' | 'kicked' | 'notFound'
   let phase = $state<Phase>('checking')
   let room = $state<RoomState | null>(null)
   let roomUrl = $state('')
   let video = $state<HTMLVideoElement>()
+  let original = $state<HTMLAudioElement>()
 
   // The item whose video is loaded, and whether its "up next" intro is showing.
   let loaded = $state<QueueItem | null>(null)
@@ -29,23 +31,27 @@
   const volume = $derived(room?.player.volume ?? 100)
   const restartNonce = $derived(room?.player.restartNonce ?? 0)
   const showQR = $derived(room?.player.showQR ?? true)
+  const vocal = $derived(room?.player.vocal ?? false)
   const upNext = $derived(room?.queue[0] ?? null)
   const qrSrc = $derived(`/api/rooms/${roomId}/qr.png`)
 
+  // No start screen: connect right away. Browsers only allow sound and fullscreen
+  // after a user gesture, so the first tap anywhere unlocks both (see unlock()).
+  // Kiosk-mode browsers (see README) need no tap at all.
   onMount(async () => {
     try {
       const info = await api<{ url: string }>('GET', `/api/rooms/${roomId}`)
       roomUrl = info.url
-      phase = 'start'
+      phase = 'playing'
     } catch {
       phase = 'notFound'
     }
   })
 
-  function start() {
+  function reconnect() {
     room = null
-    document.documentElement.requestFullscreen?.().catch(() => {})
     phase = 'playing'
+    unlock()
   }
 
   $effect(() => {
@@ -56,13 +62,40 @@
     })
   })
 
-  // Keep the screen awake while this page is open.
+  // ---- fullscreen ----
+  // Kiosk mode fills the screen without the Fullscreen API, so also compare sizes.
+  const isFullscreen = () =>
+    !!document.fullscreenElement || (innerWidth >= screen.width - 1 && innerHeight >= screen.height - 1)
+  let fullscreen = $state(isFullscreen())
   $effect(() => {
-    if (phase !== 'playing' || !('wakeLock' in navigator)) return
+    const update = () => (fullscreen = isFullscreen())
+    document.addEventListener('fullscreenchange', update)
+    addEventListener('resize', update)
+    return () => {
+      document.removeEventListener('fullscreenchange', update)
+      removeEventListener('resize', update)
+    }
+  })
+
+  function unlock() {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {})
+    if (blocked) tryPlay()
+    syncOriginal()
+  }
+
+  // ---- keep the screen awake ----
+  // The Wake Lock API needs HTTPS (or localhost). Elsewhere, fall back to a tiny
+  // muted looping video, which browsers treat as active playback.
+  let wakeFallback = $state(!('wakeLock' in navigator))
+  $effect(() => {
+    if (phase !== 'playing' || wakeFallback) return
     let lock: WakeLockSentinel | null = null
     const acquire = () => {
-      if (document.visibilityState === 'visible')
-        navigator.wakeLock.request('screen').then((l) => (lock = l)).catch(() => {})
+      if (document.visibilityState !== 'visible') return
+      navigator.wakeLock
+        .request('screen')
+        .then((l) => (lock = l))
+        .catch(() => (wakeFallback = true))
     }
     acquire()
     document.addEventListener('visibilitychange', acquire)
@@ -71,6 +104,8 @@
       lock?.release()
     }
   })
+
+  // ---- playback ----
 
   // New current song: show the intro card, then load the video.
   $effect(() => {
@@ -99,7 +134,9 @@
   })
 
   $effect(() => {
-    if (video) video.volume = volume / 100
+    const v = volume / 100
+    if (video) video.volume = v
+    if (original) original.volume = v
   })
 
   let lastNonce: number | null = null
@@ -112,7 +149,7 @@
     lastNonce = n
   })
 
-  // Autoplay can still be refused (e.g. after the browser restores the tab); offer a click to resume.
+  // Autoplay can still be refused (no gesture yet); a tap anywhere resumes.
   let blocked = $state(false)
   function tryPlay() {
     video
@@ -122,6 +159,31 @@
         if (e.name === 'NotAllowedError') blocked = true
       })
   }
+
+  // ---- original vocals: karaoke video + audio from the original-vocal file ----
+  // Both files are assumed to share a timeline. The original's audio follows the
+  // video's clock; the video is muted only once the original is actually audible.
+  let originalPlaying = $state(false)
+
+  function syncOriginal() {
+    if (!original || !video) return
+    if (!vocal || video.paused || video.ended) {
+      if (!original.paused) original.pause()
+      return
+    }
+    if (Math.abs(original.currentTime - video.currentTime) > MAX_DRIFT_S) original.currentTime = video.currentTime
+    if (original.paused) original.play().catch(() => {})
+  }
+
+  $effect(() => {
+    void vocal
+    void original
+    syncOriginal()
+  })
+
+  $effect(() => {
+    if (video) video.muted = vocal && originalPlaying
+  })
 
   function report(failed: boolean) {
     const item = loaded
@@ -140,69 +202,92 @@
   <main class="center-screen">
     <div class="narrow">
       <h2>{t('player.kicked')}</h2>
-      <button class="primary" onclick={start}>{t('player.reconnect')}</button>
+      <button class="primary" onclick={reconnect}>{t('player.reconnect')}</button>
     </div>
-  </main>
-{:else if phase === 'playing' && room && !active}
-  <main class="center-screen waiting">
-    <div class="narrow">
-      <h2>{room.settings.name}</h2>
-      <p>{t('player.waiting', { n: position })}</p>
-      <p class="muted">{t('player.waitingHint')}</p>
-    </div>
-  </main>
-{:else if phase === 'start'}
-  <main class="center-screen">
-    <button class="primary start" onclick={start}>
-      ▶ {t('player.start')}
-      <span>{t('player.startHint')}</span>
-    </button>
   </main>
 {:else}
-  <div class="stage">
-    {#if loaded}
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video
-        bind:this={video}
-        src={`/media/${loaded.songId}`}
-        autoplay
-        playsinline
-        onended={() => report(false)}
-        onerror={() => report(true)}
-      ></video>
-    {/if}
-
-    {#if intro}
-      <div class="intro">
-        <div class="kicker">{t('player.upNext')}</div>
-        <div class="intro-title">{intro.title}</div>
-        <div class="intro-artist">{intro.artist}</div>
-        <div class="intro-singer">{t('player.singer', { name: intro.nickname })}</div>
-      </div>
-    {:else if !room?.current}
+  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+  <div class="stage" onclick={unlock}>
+    {#if room && !active}
       <div class="idle">
-        <h1>{room?.settings.name ?? ''}</h1>
-        <img src={qrSrc} alt="QR code" width="320" height="320" />
-        <p class="idle-hint">{t('player.idleTitle')}</p>
-        <p class="url">{roomUrl}</p>
+        <h1>{room.settings.name}</h1>
+        <p class="idle-hint">{t('player.waiting', { n: position })}</p>
+        <p class="url">{t('player.waitingHint')}</p>
       </div>
-    {/if}
-
-    {#if loaded && blocked}
-      <button class="primary start resume" onclick={tryPlay}>▶ {t('player.start')}</button>
-    {/if}
-
-    {#if loaded && showQR}
-      <aside class="overlay">
-        <img src={qrSrc} alt="QR code" width="120" height="120" />
-        {#if upNext}
-          <div class="next">
-            <div class="kicker">{t('player.comingUp')}</div>
-            <div class="ellipsis">{upNext.title}</div>
-            <div class="ellipsis small">{upNext.nickname}</div>
-          </div>
+    {:else}
+      {#if loaded}
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video
+          bind:this={video}
+          src={`/media/${loaded.songId}`}
+          autoplay
+          playsinline
+          onended={() => {
+            syncOriginal()
+            report(false)
+          }}
+          onerror={() => report(true)}
+          onplay={syncOriginal}
+          onpause={syncOriginal}
+          onseeked={syncOriginal}
+          ontimeupdate={syncOriginal}
+        ></video>
+        {#if loaded.hasOriginal}
+          {#key loaded.id}
+            <audio
+              bind:this={original}
+              src={`/media/${loaded.songId}/original`}
+              preload="metadata"
+              onloadedmetadata={syncOriginal}
+              onplaying={() => (originalPlaying = true)}
+              onpause={() => (originalPlaying = false)}
+              onwaiting={() => (originalPlaying = false)}
+              onerror={() => (originalPlaying = false)}
+            ></audio>
+          {/key}
         {/if}
-      </aside>
+      {/if}
+
+      {#if intro}
+        <div class="intro">
+          <div class="kicker">{t('player.upNext')}</div>
+          <div class="intro-title">{intro.title}</div>
+          <div class="intro-artist">{intro.artist}</div>
+          <div class="intro-singer">{t('player.singer', { name: intro.nickname })}</div>
+        </div>
+      {:else if !room?.current}
+        <div class="idle">
+          <h1>{room?.settings.name ?? ''}</h1>
+          <img src={qrSrc} alt="QR code" width="320" height="320" />
+          <p class="idle-hint">{t('player.idleTitle')}</p>
+          <p class="url">{roomUrl}</p>
+        </div>
+      {/if}
+
+      {#if loaded && blocked}
+        <button class="primary start resume" onclick={tryPlay}>▶ {t('player.start')}</button>
+      {/if}
+
+      {#if loaded && showQR}
+        <aside class="overlay">
+          <img src={qrSrc} alt="QR code" width="120" height="120" />
+          {#if upNext}
+            <div class="next">
+              <div class="kicker">{t('player.comingUp')}</div>
+              <div class="ellipsis">{upNext.title}</div>
+              <div class="ellipsis small">{upNext.nickname}</div>
+            </div>
+          {/if}
+        </aside>
+      {/if}
+    {/if}
+
+    {#if !fullscreen}
+      <div class="tap-hint">{t('player.tapForFullscreen')}</div>
+    {/if}
+
+    {#if wakeFallback}
+      <video class="nosleep" src="/nosleep.mp4" muted loop autoplay playsinline aria-hidden="true"></video>
     {/if}
   </div>
 {/if}
@@ -215,17 +300,33 @@
     font-size: 1.5rem;
     border-radius: 18px;
   }
-  .start span {
-    font-size: 0.9rem;
-    font-weight: 400;
-    opacity: 0.85;
-  }
   .resume {
     position: absolute;
     left: 50%;
     top: 50%;
     transform: translate(-50%, -50%);
     cursor: pointer;
+  }
+  .tap-hint {
+    position: absolute;
+    top: 2vh;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.65);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    padding: 0.8vh 2vw;
+    border-radius: 99px;
+    font-size: 2.2vh;
+    pointer-events: none;
+  }
+  .nosleep {
+    position: absolute;
+    width: 2px;
+    height: 2px;
+    opacity: 0.01;
+    pointer-events: none;
+    bottom: 0;
+    left: 0;
   }
   .stage {
     position: fixed;

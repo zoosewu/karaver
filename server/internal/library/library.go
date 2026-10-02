@@ -269,6 +269,49 @@ func (l *Library) Get(id int64) (Song, error) {
 	return s, err
 }
 
+// OriginalPath returns the original-vocal companion file of a present song.
+func (l *Library) OriginalPath(id int64) (string, error) {
+	var p string
+	err := l.db.QueryRow(`SELECT original_path FROM songs WHERE id=? AND present=1`, id).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && p == "") {
+		return "", ErrNotFound
+	}
+	return p, err
+}
+
+// Favorites lists a user's favorite songs that are still in the library, newest first.
+func (l *Library) Favorites(username string) ([]Song, error) {
+	rows, err := l.db.Query(`SELECT s.id, s.title, s.artist FROM favorites f JOIN songs s ON s.id = f.song_id
+		WHERE f.username = ? AND s.present = 1 ORDER BY f.created_at DESC`, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	songs := []Song{}
+	for rows.Next() {
+		var s Song
+		if err := rows.Scan(&s.ID, &s.Title, &s.Artist); err != nil {
+			return nil, err
+		}
+		songs = append(songs, s)
+	}
+	return songs, rows.Err()
+}
+
+func (l *Library) AddFavorite(username string, songID int64) error {
+	if _, err := l.Get(songID); err != nil {
+		return err
+	}
+	_, err := l.db.Exec(`INSERT INTO favorites(username, song_id, created_at) VALUES(?,?,?)
+		ON CONFLICT(username, song_id) DO NOTHING`, username, songID, time.Now().UnixMilli())
+	return err
+}
+
+func (l *Library) RemoveFavorite(username string, songID int64) error {
+	_, err := l.db.Exec(`DELETE FROM favorites WHERE username=? AND song_id=?`, username, songID)
+	return err
+}
+
 func (l *Library) Count() (n int, err error) {
 	err = l.db.QueryRow(`SELECT COUNT(*) FROM songs WHERE present=1`).Scan(&n)
 	return

@@ -18,7 +18,7 @@
   let joining = $state(false)
   let room = $state<RoomState | null>(null)
   let connected = $state(true)
-  let tab = $state<'search' | 'queue'>('search')
+  let tab = $state<'search' | 'favorites' | 'queue'>('search')
 
   const me = $derived(room?.members.find((m) => m.userId === userId))
   const queuedSongIds = $derived(new Set([room?.current?.songId, ...(room?.queue.map((i) => i.songId) ?? [])]))
@@ -123,7 +123,51 @@
   }
 
   const control = (action: string, value = 0) => act(() => api('POST', `/api/rooms/${roomId}/control`, { action, value }))
+
+  // ---- favorites (stored per nickname on the server) ----
+  let favorites = $state<Song[]>([])
+  const favoriteIds = $derived(new Set(favorites.map((s) => s.id)))
+
+  $effect(() => {
+    if (phase !== 'ready') return
+    api<Song[]>('GET', `/api/rooms/${roomId}/favorites`)
+      .then((f) => (favorites = f))
+      .catch(() => {})
+  })
+
+  async function toggleFavorite(s: Song) {
+    const on = !favoriteIds.has(s.id)
+    // Optimistic: the star flips immediately and rolls back on failure.
+    const before = favorites
+    favorites = on ? [s, ...favorites] : favorites.filter((f) => f.id !== s.id)
+    try {
+      await api(on ? 'PUT' : 'DELETE', `/api/rooms/${roomId}/favorites/${s.id}`)
+    } catch (e) {
+      favorites = before
+      toast(errorText(errorCode(e)), 'error')
+    }
+  }
 </script>
+
+{#snippet songRow(s: Song)}
+  <li>
+    <button
+      class="ghost small star"
+      class:on={favoriteIds.has(s.id)}
+      onclick={() => toggleFavorite(s)}
+      aria-label={favoriteIds.has(s.id) ? t('room.favoriteRemove') : t('room.favoriteAdd')}
+    >
+      {favoriteIds.has(s.id) ? '★' : '☆'}
+    </button>
+    <div class="song">
+      <div class="title ellipsis">{s.title}</div>
+      <div class="sub ellipsis">{s.artist || t('common.unknownArtist')}</div>
+    </div>
+    <button class="primary small" disabled={queuedSongIds.has(s.id)} onclick={() => enqueue(s)}>
+      {t('room.add')}
+    </button>
+  </li>
+{/snippet}
 
 {#if phase === 'loading'}
   <main class="center-screen"><p class="muted">{t('common.loading')}</p></main>
@@ -182,6 +226,11 @@
               {room.current.artist || t('common.unknownArtist')} · {t('room.sungBy', { name: room.current.nickname })}
             </div>
           </div>
+          {#if room.current.hasOriginal}
+            <span class="badge" class:accent={room.player.vocal}>
+              {room.player.vocal ? t('room.vocalOn') : t('room.vocalOff')}
+            </span>
+          {/if}
           <button class="danger" onclick={skip}>{t('room.skip')}</button>
         </div>
         {#if isMyTurn}
@@ -192,6 +241,11 @@
               <button class="small" onclick={() => control('pause')}>⏸ {t('room.pause')}</button>
             {/if}
             <button class="small" onclick={() => control('restart')}>⟲ {t('room.restart')}</button>
+            {#if room.current.hasOriginal}
+              <button class="small" class:primary={!room.player.vocal} onclick={() => control('vocal', room!.player.vocal ? 0 : 1)}>
+                🎤 {room.player.vocal ? t('room.vocalSwitchOff') : t('room.vocalSwitchOn')}
+              </button>
+            {/if}
             <button class="small" onclick={() => control('qr', room!.player.showQR ? 0 : 1)}>
               {room.player.showQR ? t('room.qrHide') : t('room.qrShow')}
             </button>
@@ -216,6 +270,9 @@
 
     <nav class="tabs">
       <button class:active={tab === 'search'} onclick={() => (tab = 'search')}>{t('room.tabSearch')}</button>
+      <button class:active={tab === 'favorites'} onclick={() => (tab = 'favorites')}>
+        ★ {t('room.tabFavorites')}
+      </button>
       <button class:active={tab === 'queue'} onclick={() => (tab = 'queue')}>
         {t('room.tabQueue')}
         <span class="badge" class:accent={myCount > 0}>{room.queue.length}</span>
@@ -227,15 +284,7 @@
         <input type="search" bind:value={query} placeholder={t('room.searchPlaceholder')} enterkeyhint="search" />
         <ul class="list">
           {#each results as s (s.id)}
-            <li>
-              <div class="song">
-                <div class="title ellipsis">{s.title}</div>
-                <div class="sub ellipsis">{s.artist || t('common.unknownArtist')}</div>
-              </div>
-              <button class="primary small" disabled={queuedSongIds.has(s.id)} onclick={() => enqueue(s)}>
-                {t('room.add')}
-              </button>
-            </li>
+            {@render songRow(s)}
           {/each}
         </ul>
         {#if !searching && results.length === 0}
@@ -246,6 +295,19 @@
             {t('room.loadMore')}
           </button>
         {/if}
+      </section>
+    {:else if tab === 'favorites'}
+      <section>
+        {#if favorites.length === 0}
+          <p class="muted empty">{t('room.favoritesEmpty')}</p>
+        {:else}
+          <ul class="list">
+            {#each favorites as s (s.id)}
+              {@render songRow(s)}
+            {/each}
+          </ul>
+        {/if}
+        <p class="muted hint">{t('room.favoritesHint')}</p>
       </section>
     {:else}
       <section>
@@ -330,9 +392,21 @@
     background: none;
     accent-color: var(--accent);
   }
+  .star {
+    font-size: 1.2rem;
+    color: var(--muted);
+    padding: 4px 6px;
+  }
+  .star.on {
+    color: var(--accent);
+  }
+  .hint {
+    font-size: 0.8rem;
+    text-align: center;
+  }
   .tabs {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr;
     gap: 4px;
     background: var(--surface);
     border-radius: var(--radius);

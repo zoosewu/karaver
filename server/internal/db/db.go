@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS queue_items (
 	ended_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS queue_items_room_status ON queue_items(room_id, status);
+
+-- Favorites belong to a nickname (not a device), so the same name on another
+-- device or in another room sees the same list.
+CREATE TABLE IF NOT EXISTS favorites (
+	username   TEXT NOT NULL COLLATE NOCASE,
+	song_id    INTEGER NOT NULL REFERENCES songs(id),
+	created_at INTEGER NOT NULL,
+	PRIMARY KEY (username, song_id)
+);
 `
 
 func Open(path string) (*sql.DB, error) {

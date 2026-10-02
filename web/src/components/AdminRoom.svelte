@@ -117,6 +117,11 @@
             <button class="small" onclick={() => control('pause')}>⏸ {t('room.pause')}</button>
           {/if}
           <button class="small" onclick={() => control('restart')}>⟲ {t('room.restart')}</button>
+          {#if room.current.hasOriginal}
+            <button class="small" onclick={() => control('vocal', room!.player.vocal ? 0 : 1)}>
+              🎤 {room.player.vocal ? t('room.vocalSwitchOff') : t('room.vocalSwitchOn')}
+            </button>
+          {/if}
           <label class="row volume">
             <span class="muted">{t('room.volume')} {room.player.volume}</span>
             <input

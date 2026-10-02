@@ -23,5 +23,6 @@ var (
 	ErrQueueLimit       = &Error{409, "queue_limit"}
 	ErrNotCurrent       = &Error{409, "not_current"}
 	ErrReorderNeedsFIFO = &Error{409, "reorder_requires_fifo"}
+	ErrNoOriginal       = &Error{409, "no_original"}
 	ErrInternal         = &Error{500, "internal"}
 )

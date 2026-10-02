@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/skip2/go-qrcode"
 
+	"karaver/internal/library"
 	"karaver/internal/room"
 )
 
@@ -60,7 +63,26 @@ func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	f, err := os.Open(filepath.Join(s.cfg.MediaDir, filepath.FromSlash(song.Path)))
+	s.serveMediaFile(w, r, song.Path)
+}
+
+// handleOriginal serves the original-vocal companion; the player uses only its audio.
+func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request) {
+	id, err := pathInt(r, "id")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	p, err := s.lib.OriginalPath(id)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveMediaFile(w, r, p)
+}
+
+func (s *Server) serveMediaFile(w http.ResponseWriter, r *http.Request, rel string) {
+	f, err := os.Open(filepath.Join(s.cfg.MediaDir, filepath.FromSlash(rel)))
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -425,4 +447,84 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeOK(w)
+}
+
+// ---- favorites (keyed by the member's nickname) ----
+
+func (s *Server) memberNickname(w http.ResponseWriter, r *http.Request) (string, bool) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return "", false
+	}
+	userID, ok := s.userID(r)
+	if !ok {
+		writeErr(w, room.ErrUnauthorized)
+		return "", false
+	}
+	nick, err := rm.Nickname(userID)
+	if err != nil {
+		writeErr(w, err)
+		return "", false
+	}
+	return nick, true
+}
+
+func (s *Server) handleFavorites(w http.ResponseWriter, r *http.Request) {
+	nick, ok := s.memberNickname(w, r)
+	if !ok {
+		return
+	}
+	songs, err := s.lib.Favorites(nick)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, songs)
+}
+
+func (s *Server) handleAddFavorite(w http.ResponseWriter, r *http.Request) {
+	nick, ok := s.memberNickname(w, r)
+	if !ok {
+		return
+	}
+	songID, err := pathInt(r, "song")
+	if err != nil {
+		writeErr(w, room.ErrInvalid)
+		return
+	}
+	if err := s.lib.AddFavorite(nick, songID); err != nil {
+		if errors.Is(err, library.ErrNotFound) {
+			err = room.ErrSongNotFound
+		}
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleRemoveFavorite(w http.ResponseWriter, r *http.Request) {
+	nick, ok := s.memberNickname(w, r)
+	if !ok {
+		return
+	}
+	songID, err := pathInt(r, "song")
+	if err != nil {
+		writeErr(w, room.ErrInvalid)
+		return
+	}
+	if err := s.lib.RemoveFavorite(nick, songID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.db.PingContext(ctx); err != nil {
+		http.Error(w, "db: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	w.Write([]byte("ok"))
 }

@@ -29,4 +29,5 @@ FROM gcr.io/distroless/static-debian12
 COPY --from=server /out/karaver /karaver
 ENV LISTEN=:8080 DATA_DIR=/data MEDIA_DIR=/media
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/karaver", "healthcheck"]
 ENTRYPOINT ["/karaver"]
