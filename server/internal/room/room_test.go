@@ -598,3 +598,102 @@ func TestReplayAll(t *testing.T) {
 	}
 	eq(t, order(r), "b2", "a4")
 }
+
+func TestClearHistory(t *testing.T) {
+	d, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	if _, err := r.ClearHistory("a", false); !errors.Is(err, ErrNoHistory) {
+		t.Fatalf("nothing to clear: %v", err)
+	}
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "b", 2)
+	mustEnqueue(t, r, "c", 3)
+	finishCurrent(t, r) // a1 -> history, b2 playing, c3 waiting
+	if _, err := r.ClearHistory("a", false); !errors.Is(err, ErrQueueNotEmpty) {
+		t.Fatalf("queue not empty: %v", err)
+	}
+	finishCurrent(t, r) // b2 -> history, c3 playing, queue empty
+	if _, err := r.ClearHistory("zzz", false); !errors.Is(err, ErrNotMember) {
+		t.Fatalf("stranger: %v", err)
+	}
+	rev := r.historyRev
+	n, err := r.ClearHistory("a", false)
+	if err != nil || n != 2 {
+		t.Fatalf("clear: n=%d err=%v", n, err)
+	}
+	if r.historyRev != rev+1 {
+		t.Fatal("history revision not bumped")
+	}
+	// The playing song is untouched; history is empty.
+	if current(r) != "c3" {
+		t.Fatalf("current = %s", current(r))
+	}
+	h, _ := m.History(r.ID, 10, HistoryCursor{})
+	if len(h) != 0 {
+		t.Fatalf("history left: %v", h)
+	}
+	var left int
+	d.QueryRow(`SELECT COUNT(*) FROM queue_items WHERE room_id=?`, r.ID).Scan(&left)
+	if left != 1 {
+		t.Fatalf("rows left = %d, want only the playing one", left)
+	}
+}
+
+func TestRateAndSeek(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	if r.ratePct != 100 {
+		t.Fatalf("default rate = %d", r.ratePct)
+	}
+	if err := r.Control("a", false, "seek", 3); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("seek with nothing playing: %v", err)
+	}
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "b", 2)
+
+	// Same permission as pause: the requester or an admin.
+	if err := r.Control("b", false, "rate", 120); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("other member: %v", err)
+	}
+	for _, c := range []struct{ in, want int }{{125, 125}, {10, 50}, {400, 150}} {
+		if err := r.Control("a", false, "rate", c.in); err != nil || r.ratePct != c.want {
+			t.Fatalf("rate %d -> %d (%v), want %d", c.in, r.ratePct, err, c.want)
+		}
+	}
+	nonce := r.seekNonce
+	if err := r.Control("", true, "seek", -3); err != nil || r.seekNonce != nonce+1 || r.seekDelta != -3 {
+		t.Fatalf("seek back: %v nonce=%d delta=%d", err, r.seekNonce, r.seekDelta)
+	}
+	if err := r.Control("", true, "seek", 999); err != nil || r.seekDelta != 30 {
+		t.Fatalf("seek clamp: %v delta=%d", err, r.seekDelta)
+	}
+	if err := r.Control("", true, "seek", 0); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("seek 0: %v", err)
+	}
+
+	// The next song starts at normal speed.
+	finishCurrent(t, r)
+	if r.ratePct != 100 {
+		t.Fatalf("rate not reset for the next song: %d", r.ratePct)
+	}
+}
+
+func TestKeyShift(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "b", 2)
+	if err := r.Control("b", false, "key", 2); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("other member: %v", err)
+	}
+	for _, c := range []struct{ in, want int }{{2, 2}, {-3, -3}, {9, 6}, {-20, -6}, {0, 0}} {
+		if err := r.Control("a", false, "key", c.in); err != nil || r.keyShift != c.want {
+			t.Fatalf("key %d -> %d (%v), want %d", c.in, r.keyShift, err, c.want)
+		}
+	}
+	r.Control("a", false, "key", -2)
+	finishCurrent(t, r)
+	if r.keyShift != 0 {
+		t.Fatalf("key not reset for the next song: %d", r.keyShift)
+	}
+}

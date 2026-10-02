@@ -360,7 +360,8 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h, err := s.rooms.History(rm.ID, 100, room.HistoryCursor{})
+	limit, cur := historyQuery(r)
+	h, err := s.rooms.History(rm.ID, limit, cur)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -543,15 +544,7 @@ func (s *Server) handleRoomHistory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Paged: ?limit=50&before_started=…&before_id=… for older entries.
-	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 100 {
-		limit = 50
-	}
-	var cur room.HistoryCursor
-	cur.StartedAt, _ = strconv.ParseInt(q.Get("before_started"), 10, 64)
-	cur.ID, _ = strconv.ParseInt(q.Get("before_id"), 10, 64)
+	limit, cur := historyQuery(r)
 	h, err := s.rooms.History(rm.ID, limit, cur)
 	if err != nil {
 		writeErr(w, err)
@@ -603,4 +596,35 @@ func (s *Server) handleReplayAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"queued": n})
+}
+
+// historyQuery reads ?limit=50&before_started=…&before_id=… (the cursor of the
+// oldest entry already shown) for paging through history.
+func historyQuery(r *http.Request) (int, room.HistoryCursor) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	var cur room.HistoryCursor
+	cur.StartedAt, _ = strconv.ParseInt(q.Get("before_started"), 10, 64)
+	cur.ID, _ = strconv.ParseInt(q.Get("before_id"), 10, 64)
+	return limit, cur
+}
+
+func (s *Server) handleClearHistory(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, admin, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	n, err := rm.ClearHistory(userID, admin)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"deleted": n})
 }

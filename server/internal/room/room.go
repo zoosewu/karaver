@@ -15,6 +15,14 @@ const (
 	ModeRoundRobin = "rr"
 )
 
+// Playback speed limits, in percent.
+const (
+	minRatePct = 50
+	maxRatePct = 150
+	// Key change range in semitones; beyond this the pitch shifter sounds artificial.
+	maxKeyShift = 6
+)
+
 type Item struct {
 	ID        int64
 	SongID    int64
@@ -53,7 +61,12 @@ type Room struct {
 	volume       int
 	paused       bool
 	restartNonce int64
-	vocal        bool // play the original-vocal audio over the karaoke video; reset per song
+	vocal        bool  // play the original-vocal audio over the karaoke video; reset per song
+	historyRev   int64 // bumped when history is cleared, so clients drop what they loaded
+	ratePct      int   // playback speed in percent (pitch is preserved); reset per song
+	seekNonce    int64 // bumped on every relative seek; seekDelta is how far
+	seekDelta    int
+	keyShift     int  // semitones, -6..6, applied on the TV; reset per song
 	playerDirty  bool // volume/showQR changed since the last flush
 	current      *Item
 	queue        []*Item // unordered; see orderedLocked
@@ -73,6 +86,7 @@ func newRoom(m *Manager, id string, s Settings) *Room {
 		settings:     s,
 		showQR:       true,
 		volume:       100,
+		ratePct:      100,
 		members:      map[string]*Member{},
 		lastSung:     map[string]int64{},
 		lastActivity: time.Now(),
@@ -172,6 +186,8 @@ func (r *Room) finishLocked(status string) {
 	r.current = nil
 	r.paused = false
 	r.vocal = false
+	r.ratePct = 100
+	r.keyShift = 0
 }
 
 func (r *Room) advanceLocked() {
@@ -193,6 +209,8 @@ func (r *Room) advanceLocked() {
 	r.current = next
 	r.paused = false
 	r.vocal = false
+	r.ratePct = 100
+	r.keyShift = 0
 }
 
 // ---- subscribers ----
@@ -452,6 +470,19 @@ func (r *Room) Control(userID string, admin bool, action string, value int) erro
 	case "volume":
 		r.volume = min(max(value, 0), 100)
 		r.playerDirty = true // written on shutdown, see flush
+	case "rate":
+		r.ratePct = min(max(value, minRatePct), maxRatePct)
+	case "key":
+		if r.current == nil {
+			return ErrInvalid
+		}
+		r.keyShift = min(max(value, -maxKeyShift), maxKeyShift)
+	case "seek":
+		if r.current == nil || value == 0 {
+			return ErrInvalid
+		}
+		r.seekDelta = min(max(value, -30), 30)
+		r.seekNonce++
 	case "vocal":
 		if r.current == nil || !r.current.HasOriginal {
 			return ErrNoOriginal
@@ -645,6 +676,35 @@ func (r *Room) ReplayAll(userID string, admin bool) (int, error) {
 	return len(items), nil
 }
 
+// ClearHistory deletes the room's finished songs. Like ReplayAll it is only
+// offered while nothing is waiting in the queue. The current song, members and
+// favorites are untouched. Returns how many entries were deleted.
+func (r *Room) ClearHistory(userID string, admin bool) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !admin {
+		if err := r.checkMemberLocked(userID); err != nil {
+			return 0, err
+		}
+	}
+	if len(r.queue) > 0 {
+		return 0, ErrQueueNotEmpty
+	}
+	res, err := r.m.db.Exec(`DELETE FROM queue_items WHERE room_id = ? AND status IN ('done', 'skipped', 'failed')`, r.ID)
+	if err != nil {
+		log.Printf("room %s: db: %v", r.ID, err)
+		return 0, ErrInternal
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return 0, ErrNoHistory
+	}
+	r.historyRev++
+	r.touch()
+	r.broadcastLocked()
+	return n, nil
+}
+
 // Move places a queued item at index (0-based) of the play order. FIFO only.
 func (r *Room) Move(itemID int64, index int) error {
 	r.mu.Lock()
@@ -781,6 +841,10 @@ type playerView struct {
 	ShowQR       bool  `json:"showQR"`
 	RestartNonce int64 `json:"restartNonce"`
 	Vocal        bool  `json:"vocal"`
+	RatePct      int   `json:"rate"`      // playback speed, percent
+	SeekNonce    int64 `json:"seekNonce"` // changes on every relative seek
+	SeekDelta    int   `json:"seekDelta"` // seconds, negative = back
+	Key          int   `json:"key"`       // semitones up (+) or down (-)
 }
 
 // playerClientView lists a player connection for admins.
@@ -809,6 +873,8 @@ type stateView struct {
 	Members  []memberView       `json:"members"`
 	Players  []playerClientView `json:"players,omitempty"` // admins only
 	Self     *selfView          `json:"self,omitempty"`    // player connections only
+	// HistoryRev changes when the history is cleared; clients reload it.
+	HistoryRev int64 `json:"historyRev"`
 }
 
 func message(typ string) []byte {
@@ -832,14 +898,16 @@ func (r *Room) viewLocked(admin bool) stateView {
 		}
 	}
 	s := stateView{
-		Type:     "state",
-		ID:       r.ID,
-		Settings: r.settings,
-		Queue:    []itemView{},
-		Members:  []memberView{},
+		Type:       "state",
+		ID:         r.ID,
+		Settings:   r.settings,
+		Queue:      []itemView{},
+		Members:    []memberView{},
+		HistoryRev: r.historyRev,
 		Player: playerView{
 			Online: len(r.players) > 0, Paused: r.paused, Volume: r.volume,
 			ShowQR: r.showQR, RestartNonce: r.restartNonce, Vocal: r.vocal,
+			RatePct: r.ratePct, SeekNonce: r.seekNonce, SeekDelta: r.seekDelta, Key: r.keyShift,
 		},
 	}
 	if r.current != nil {

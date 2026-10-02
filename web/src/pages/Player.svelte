@@ -2,6 +2,7 @@
   import { onMount, untrack } from 'svelte'
   import Marquee from '../components/Marquee.svelte'
   import { api } from '../lib/api'
+  import { KeyShift } from '../lib/keyshift'
   import { t } from '../lib/i18n'
   import { toast } from '../lib/toast.svelte'
   import { connectRoom } from '../lib/ws'
@@ -33,6 +34,9 @@
   const restartNonce = $derived(room?.player.restartNonce ?? 0)
   const showQR = $derived(room?.player.showQR ?? true)
   const vocal = $derived(room?.player.vocal ?? false)
+  const rate = $derived((room?.player.rate ?? 100) / 100)
+  const seekNonce = $derived(room?.player.seekNonce ?? 0)
+  const key = $derived(active ? (room?.player.key ?? 0) : 0)
   const upNext = $derived(room?.queue[0] ?? null)
   const qrSrc = $derived(`/api/rooms/${roomId}/qr.png`)
 
@@ -89,7 +93,54 @@
     if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {})
     if (blocked) tryPlay()
     syncOriginal()
+    keyRetry++ // a tap is what lets the audio graph start
   }
+
+  // ---- key change (see lib/keyshift.ts) ----
+  // Audio is only re-routed once someone asks for a key change, and only if the
+  // browser lets the AudioContext run; otherwise the TV asks for one tap instead
+  // of going silent.
+  let keyShift: KeyShift | null = null
+  let keyWaiting = $state(false)
+  let keyRetry = $state(0)
+
+  let creating: Promise<KeyShift | null> | null = null
+  function ensureKeyShift(): Promise<KeyShift | null> {
+    if (keyShift) return Promise.resolve(keyShift)
+    // Share one in-flight attempt so quick key presses never build two graphs.
+    creating ??= (async () => {
+      const ks = new KeyShift()
+      await ks.resume()
+      creating = null
+      if (!ks.running) {
+        ks.close()
+        return null
+      }
+      keyShift = ks
+      // Test hook: the e2e suite reads the output pitch from ks.analyser.
+      ;(window as unknown as { __zkKeyShift?: KeyShift }).__zkKeyShift = ks
+      return ks
+    })()
+    return creating
+  }
+
+  $effect(() => {
+    const n = key
+    const v = video
+    const o = original
+    void keyRetry
+    if (n === 0 && !keyShift) {
+      keyWaiting = false
+      return
+    }
+    ensureKeyShift().then((ks) => {
+      keyWaiting = !ks && n !== 0
+      if (!ks) return
+      if (v) ks.attach(v)
+      if (o) ks.attach(o)
+      ks.setSemitones(n)
+    })
+  })
 
   // ---- keep the screen awake ----
   // The Wake Lock API needs HTTPS (or localhost). Elsewhere, fall back to a tiny
@@ -155,6 +206,28 @@
       tryPlay()
     }
     lastNonce = n
+  })
+
+  // Speed: the browser time-stretches and keeps the pitch (preservesPitch is on by
+  // default). A new src resets playbackRate, so re-apply when the song changes.
+  $effect(() => {
+    void loaded
+    const r = rate
+    if (video) video.playbackRate = r
+    if (original) original.playbackRate = r
+  })
+
+  // Relative seek (±3 s from the admin page). The original-vocal track follows
+  // through the video's "seeked" event.
+  let lastSeek: number | null = null
+  $effect(() => {
+    const n = seekNonce
+    if (lastSeek !== null && n !== lastSeek && video && loaded) {
+      const delta = untrack(() => room?.player.seekDelta ?? 0)
+      const end = Number.isFinite(video.duration) ? video.duration - 0.5 : Infinity
+      video.currentTime = Math.min(Math.max(0, video.currentTime + delta), end)
+    }
+    lastSeek = n
   })
 
   // Autoplay can still be refused (no gesture yet); a tap anywhere resumes.
@@ -292,6 +365,11 @@
 
     {#if !fullscreen}
       <div class="tap-hint">{t('player.tapForFullscreen')}</div>
+    {:else if keyWaiting}
+      <div class="tap-hint">{t('player.tapForKey')}</div>
+    {/if}
+    {#if key !== 0}
+      <div class="key-badge">{t('player.key', { n: key > 0 ? `+${key}` : `${key}` })}</div>
     {/if}
 
     {#if wakeFallback}
@@ -325,6 +403,18 @@
     padding: 0.8vh 2vw;
     border-radius: 99px;
     font-size: 2.2vh;
+    pointer-events: none;
+  }
+  .key-badge {
+    position: absolute;
+    top: 2vh;
+    right: 2vw;
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px solid var(--accent);
+    color: #fff;
+    padding: 0.6vh 1.4vw;
+    border-radius: 99px;
+    font-size: 2.4vh;
     pointer-events: none;
   }
   .nosleep {

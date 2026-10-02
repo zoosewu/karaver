@@ -63,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/rooms/{id}/queue/{item}", s.handleRemove)
 	mux.HandleFunc("POST /api/rooms/{id}/queue/{item}/move", s.handleReorder)
 	mux.HandleFunc("POST /api/rooms/{id}/replay-all", s.handleReplayAll)
+	mux.HandleFunc("POST /api/rooms/{id}/clear-history", s.handleClearHistory)
 	mux.HandleFunc("GET /api/rooms/{id}/history", s.handleRoomHistory)
 	mux.HandleFunc("POST /api/rooms/{id}/skip", s.handleSkip)
 	mux.HandleFunc("POST /api/rooms/{id}/control", s.handleControl)

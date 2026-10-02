@@ -8,6 +8,7 @@
   import { router } from '../lib/router.svelte'
   import { storage } from '../lib/storage'
   import { toast } from '../lib/toast.svelte'
+  import { keyActions, keyLabel } from '../lib/controls'
   import { setTheme, themeState } from '../lib/theme.svelte'
   import { connectRoom } from '../lib/ws'
   import type { HistoryEntry, QueueItem, RoomState, Song } from '../lib/types'
@@ -98,6 +99,17 @@
     } finally {
       if (seq === searchSeq) searching = false
     }
+    // If the page did not fill the screen, keep going.
+    if (seq === searchSeq) {
+      await tick()
+      maybeLoadMoreResults()
+    }
+  }
+
+  // Search results load the next page automatically near the bottom of the list.
+  function maybeLoadMoreResults() {
+    if (tab !== 'search' || !more || searching || !scroller) return
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 400) runSearch(query, results.length)
   }
 
   $effect(() => {
@@ -155,9 +167,20 @@
     }
   }
 
+  // Someone cleared the history (on any device): drop what this page loaded.
+  const historyRev = $derived(room?.historyRev ?? 0)
+  let seenHistoryRev = 0
+
   $effect(() => {
     void currentId
-    if (phase === 'ready') loadNewestHistory()
+    const rev = historyRev
+    if (phase !== 'ready') return
+    if (rev !== seenHistoryRev) {
+      seenHistoryRev = rev
+      history = []
+      historyMore = false
+    }
+    loadNewestHistory()
   })
 
   // ---- "N more songs until your turn" ----
@@ -291,6 +314,22 @@
           }
         },
       },
+      {
+        label: `🗑 ${t('room.clearHistory')}`,
+        danger: true,
+        disabled: !available,
+        hint: available ? t('room.clearHistoryHint') : t('room.replayAllUnavailable'),
+        run: async () => {
+          if (await askTwice(t('room.clearHistoryConfirm'), t('room.clearHistoryConfirm2'), t('room.clearHistory'))) {
+            try {
+              const r = await api<{ deleted: number }>('POST', `/api/rooms/${roomId}/clear-history`)
+              toast(t('room.clearHistoryDone', { n: r.deleted }))
+            } catch (e) {
+              toast(errorText(errorCode(e)), 'error')
+            }
+          }
+        },
+      },
     ])
   }
 
@@ -341,8 +380,9 @@
         run: () => control('volume', Math.max(0, p.volume - 10)),
       },
       { label: `▦ ${p.showQR ? t('room.qrHide') : t('room.qrShow')}`, run: () => control('qr', p.showQR ? 0 : 1) },
+      ...keyActions(p.key, control),
     )
-    sheet(t('room.moreControls'), actions, t('room.volumeNow', { n: p.volume }))
+    sheet(t('room.moreControls'), actions, `${t('room.volumeNow', { n: p.volume })} · ${keyLabel(p.key)}`)
   }
 
   // ---- the list area below the fixed top is the only thing that scrolls ----
@@ -383,6 +423,7 @@
       scrollTop = scroller.scrollTop
       // Lazy-load older history when the top of the list comes into view.
       if (tab === 'queue' && scrollTop < ROW_H * 8) loadOlderHistory()
+      maybeLoadMoreResults()
     })
   }
 
@@ -491,6 +532,7 @@
                 {room.player.vocal ? t('room.vocalOn') : t('room.vocalOff')}
               </span>
             {/if}
+            {#if room.player.key !== 0}<span class="badge accent">{keyLabel(room.player.key)}</span>{/if}
             {#if turnText}<span class="badge accent turn">{turnText}</span>{/if}
           </div>
           <div class="transport" class:mine={isMyTurn}>
@@ -542,9 +584,7 @@
           <p class="muted empty">{t('room.noResults')}</p>
         {/if}
         {#if more}
-          <button class="load-more" disabled={searching} onclick={() => runSearch(query, results.length)}>
-            {t('room.loadMore')}
-          </button>
+          <p class="muted loading-more">{t('common.loading')}</p>
         {/if}
       {:else if tab === 'favorites'}
         {#if favorites.length === 0}
@@ -840,9 +880,10 @@
     text-align: center;
     padding: 24px 0;
   }
-  .load-more {
-    width: 100%;
-    margin: 8px 0;
+  .loading-more {
+    text-align: center;
+    font-size: 0.85rem;
+    padding: 12px 0;
   }
   .qr-backdrop {
     position: fixed;

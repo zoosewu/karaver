@@ -45,12 +45,21 @@ export interface RoomState {
     restartNonce: number
     /** true = original vocals (karaoke video + original audio) */
     vocal: boolean
+    /** playback speed in percent; pitch is preserved */
+    rate: number
+    /** changes on every relative seek; seekDelta is how many seconds */
+    seekNonce: number
+    seekDelta: number
+    /** key change in semitones (-6..6), applied on the TV */
+    key: number
   }
   members: Member[]
   /** Admin connections only: every connected player, active one first. */
   players?: PlayerConnection[]
   /** Player connections only: 0 = active, 1 = next in line, ... */
   self?: { secret: string; position: number }
+  /** Changes when the history is cleared: reload it. */
+  historyRev: number
 }
 
 export interface PlayerConnection {

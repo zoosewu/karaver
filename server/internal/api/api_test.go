@@ -511,3 +511,27 @@ func TestQRCodeHasLogo(t *testing.T) {
 		t.Fatalf("centre pixel %v does not look like the logo", c)
 	}
 }
+
+func TestClearHistoryOverHTTP(t *testing.T) {
+	e := setup(t)
+	adm := e.admin()
+	id := e.newRoom(adm)
+	base := "/api/rooms/" + id
+	u := e.user()
+	u.do("POST", base+"/join", map[string]string{"nickname": "U"}, 204, nil)
+	u.do("POST", base+"/clear-history", nil, 409, nil) // no history yet
+	u.do("POST", base+"/queue", map[string]int64{"songId": e.songID("one")}, 204, nil)
+	u.do("POST", base+"/skip", map[string]int64{"itemId": 1}, 204, nil)
+	e.anon().do("POST", base+"/clear-history", nil, 401, nil)
+	e.user().do("POST", base+"/clear-history", nil, 403, nil) // not a member
+	var res struct{ Deleted int }
+	u.do("POST", base+"/clear-history", nil, 200, &res)
+	if res.Deleted != 1 {
+		t.Fatalf("deleted %d", res.Deleted)
+	}
+	var hist []room.HistoryEntry
+	u.do("GET", base+"/history", nil, 200, &hist)
+	if len(hist) != 0 {
+		t.Fatalf("history after clear = %+v", hist)
+	}
+}
