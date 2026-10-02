@@ -261,12 +261,49 @@
     }
   }
 
-  // ---- queue tab: open with the current song at the top; history is above it ----
+  // Vocal / TV QR / volume live behind one button to keep the fixed top short.
+  function moreControls() {
+    const p = room?.player
+    const cur = room?.current
+    if (!p || !cur) return
+    const actions: SheetAction[] = []
+    if (cur.hasOriginal)
+      actions.push({
+        label: `🎤 ${p.vocal ? t('room.vocalSwitchOff') : t('room.vocalSwitchOn')}`,
+        run: () => control('vocal', p.vocal ? 0 : 1),
+      })
+    actions.push(
+      {
+        label: `🔊 ${t('room.volumeUp')}`,
+        disabled: p.volume >= 100,
+        run: () => control('volume', Math.min(100, p.volume + 10)),
+      },
+      {
+        label: `🔉 ${t('room.volumeDown')}`,
+        disabled: p.volume <= 0,
+        run: () => control('volume', Math.max(0, p.volume - 10)),
+      },
+      { label: `▦ ${p.showQR ? t('room.qrHide') : t('room.qrShow')}`, run: () => control('qr', p.showQR ? 0 : 1) },
+    )
+    sheet(t('room.moreControls'), actions, t('room.volumeNow', { n: p.volume }))
+  }
+
+  // ---- the list area below the fixed top is the only thing that scrolls ----
+  let scroller = $state<HTMLElement>()
   let nowEl = $state<HTMLElement>()
-  async function openQueue() {
-    tab = 'queue'
+
+  async function switchTab(next: typeof tab) {
+    tab = next
     await tick()
-    nowEl?.scrollIntoView({ block: 'start' })
+    // Wait one frame so the new list (and the spacer below it) is laid out.
+    await new Promise(requestAnimationFrame)
+    if (!scroller) return
+    if (next === 'queue' && nowEl) {
+      // The queue tab opens on the current song; history sits above it.
+      scroller.scrollTop += nowEl.getBoundingClientRect().top - scroller.getBoundingClientRect().top
+    } else {
+      scroller.scrollTop = 0
+    }
   }
 </script>
 
@@ -329,91 +366,78 @@
     </form>
   </main>
 {:else if room}
-  <div class="page">
-    <header class="row">
-      <div class="room-name"><Marquee text={room.settings.name} /></div>
-      <span class="badge">{room.settings.mode === 'rr' ? t('room.modeRr') : t('room.modeFifo')}</span>
-      <button class="ghost small icon" onclick={() => (showQRCode = true)} aria-label={t('room.showQR')}>QR</button>
-      <button class="ghost small icon" onclick={roomMenu} aria-label={t('room.settings')}>⚙</button>
-      <button class="ghost small nick" onclick={() => (phase = 'nickname')} title={t('room.changeNickname')}>
-        <Marquee text={me?.nickname ?? nickname} />
-      </button>
-    </header>
+  <div class="app">
+    <!-- Fixed top: everything you operate. Kept as short as possible. -->
+    <div class="top">
+      <header class="row">
+        <div class="room-name"><Marquee text={room.settings.name} /></div>
+        <span class="badge">{room.settings.mode === 'rr' ? t('room.modeRr') : t('room.modeFifo')}</span>
+        <button class="ghost small icon" onclick={() => (showQRCode = true)} aria-label={t('room.showQR')}>QR</button>
+        <button class="ghost small icon" onclick={roomMenu} aria-label={t('room.settings')}>⚙</button>
+        <button class="ghost small nick" onclick={() => (phase = 'nickname')} title={t('room.changeNickname')}>
+          <Marquee text={me?.nickname ?? nickname} />
+        </button>
+      </header>
 
-    {#if !connected}<div class="banner">{t('common.offline')}</div>{/if}
+      {#if !connected}<div class="banner">{t('common.offline')}</div>{/if}
 
-    <section class="card now">
-      <div class="label muted">{t('room.nowPlaying')}</div>
-      {#if room.current}
-        <div class="row">
-          <div class="song">
-            <Marquee class="title" text={room.current.title} />
-            <Marquee
-              class="sub"
-              text={`${room.current.artist || t('common.unknownArtist')} · ${t('room.sungBy', { name: room.current.nickname })}`}
-            />
-          </div>
-          {#if room.current.hasOriginal}
-            <span class="badge" class:accent={room.player.vocal}>
-              {room.player.vocal ? t('room.vocalOn') : t('room.vocalOff')}
-            </span>
-          {/if}
-        </div>
-        <div class="transport" class:single={!isMyTurn}>
-          {#if isMyTurn}
-            <button onclick={togglePause}>
-              {room.player.paused ? `▶ ${t('room.play')}` : `⏸ ${t('room.pause')}`}
-            </button>
-            <button onclick={restart}>⟲ {t('room.restart')}</button>
-          {/if}
-          <button onclick={skip}>⏭ {t('room.skip')}</button>
-        </div>
-        {#if isMyTurn}
-          <div class="controls">
-            {#if room.current.hasOriginal}
-              <button class="small" onclick={() => control('vocal', room!.player.vocal ? 0 : 1)}>
-                🎤 {room.player.vocal ? t('room.vocalSwitchOff') : t('room.vocalSwitchOn')}
-              </button>
-            {/if}
-            <button class="small" onclick={() => control('qr', room!.player.showQR ? 0 : 1)}>
-              {room.player.showQR ? t('room.qrHide') : t('room.qrShow')}
-            </button>
-            <label class="volume row">
-              <span class="muted">{t('room.volume')}</span>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="5"
-                value={room.player.volume}
-                onchange={(e) => control('volume', +e.currentTarget.value)}
+      <section class="now" class:idle={!room.current}>
+        {#if room.current}
+          <div class="row now-line">
+            <span class="note" class:paused={room.player.paused}>{room.player.paused ? '⏸' : '♪'}</span>
+            <div class="song">
+              <Marquee class="title" text={room.current.title} />
+              <Marquee
+                class="sub"
+                text={`${room.current.artist || t('common.unknownArtist')} · ${t('room.sungBy', { name: room.current.nickname })}`}
               />
-            </label>
+            </div>
+            {#if room.current.hasOriginal}
+              <span class="badge" class:accent={room.player.vocal}>
+                {room.player.vocal ? t('room.vocalOn') : t('room.vocalOff')}
+              </span>
+            {/if}
           </div>
+          <div class="transport" class:mine={isMyTurn}>
+            {#if isMyTurn}
+              <button onclick={togglePause}>
+                {room.player.paused ? `▶ ${t('room.play')}` : `⏸ ${t('room.pause')}`}
+              </button>
+              <button onclick={restart}>⟲ {t('room.restart')}</button>
+            {/if}
+            <button onclick={skip}>⏭ {t('room.skip')}</button>
+            {#if isMyTurn}
+              <button class="more" onclick={moreControls} aria-label={t('room.moreControls')}>⋯</button>
+            {/if}
+          </div>
+        {:else}
+          <div class="muted nothing">{t('room.nothingPlaying')}</div>
         {/if}
-      {:else}
-        <div class="muted">{t('room.nothingPlaying')}</div>
+      </section>
+
+      {#if !room.player.online}
+        <PairTV endpoint={`/api/rooms/${roomId}/tv/pair`} compact />
       {/if}
-    </section>
 
-    {#if !room.player.online}
-      <section class="card"><PairTV endpoint={`/api/rooms/${roomId}/tv/pair`} /></section>
-    {/if}
+      <nav class="tabs">
+        <button class:active={tab === 'search'} onclick={() => switchTab('search')}>{t('room.tabSearch')}</button>
+        <button class:active={tab === 'favorites'} onclick={() => switchTab('favorites')}>
+          ★ {t('room.tabFavorites')}
+        </button>
+        <button class:active={tab === 'queue'} onclick={() => switchTab('queue')}>
+          {t('room.tabQueue')}
+          <span class="badge" class:accent={myCount > 0}>{room.queue.length}</span>
+        </button>
+      </nav>
 
-    <nav class="tabs">
-      <button class:active={tab === 'search'} onclick={() => (tab = 'search')}>{t('room.tabSearch')}</button>
-      <button class:active={tab === 'favorites'} onclick={() => (tab = 'favorites')}>
-        ★ {t('room.tabFavorites')}
-      </button>
-      <button class:active={tab === 'queue'} onclick={openQueue}>
-        {t('room.tabQueue')}
-        <span class="badge" class:accent={myCount > 0}>{room.queue.length}</span>
-      </button>
-    </nav>
-
-    {#if tab === 'search'}
-      <section>
+      {#if tab === 'search'}
         <input type="search" bind:value={query} placeholder={t('room.searchPlaceholder')} enterkeyhint="search" />
+      {/if}
+    </div>
+
+    <!-- The only scrolling region. -->
+    <div class="scroller" bind:this={scroller}>
+      {#if tab === 'search'}
         <ul class="list">
           {#each results as s (s.id)}
             {@render songRow(s)}
@@ -427,9 +451,7 @@
             {t('room.loadMore')}
           </button>
         {/if}
-      </section>
-    {:else if tab === 'favorites'}
-      <section>
+      {:else if tab === 'favorites'}
         {#if favorites.length === 0}
           <p class="muted empty">{t('room.favoritesEmpty')}</p>
         {:else}
@@ -440,14 +462,13 @@
           </ul>
         {/if}
         <p class="muted hint">{t('room.favoritesHint')}</p>
-      </section>
-    {:else}
-      <section class="timeline">
+      {:else}
+        <!-- No section titles: history is dimmed, the current song is highlighted, upcoming is plain. -->
         {#if history.length > 0}
-          <div class="divider">{t('room.history')}</div>
           <ul class="list history">
             {#each history as h (h.id)}
               <li>
+                <span class="idx"></span>
                 <div class="song">
                   <Marquee class="title" text={h.title} />
                   <Marquee
@@ -463,48 +484,45 @@
           </ul>
         {/if}
 
-        <div class="now-row" bind:this={nowEl}>
-          <div class="divider">{t('room.nowPlaying')}</div>
-          {#if room.current}
-            <ul class="list">
-              <li class="playing" class:mine={room.current.userId === userId}>
-                <span class="idx">♪</span>
-                <div class="song">
-                  <Marquee class="title" text={room.current.title} />
-                  <Marquee class="sub" text={room.current.artist || t('common.unknownArtist')} />
-                </div>
-                <span class="who">{room.current.nickname}</span>
-                {@render star({ id: room.current.songId, title: room.current.title, artist: room.current.artist })}
-              </li>
-            </ul>
+        <!-- min-height: 100% leaves exactly enough room to scroll the current song to the top. -->
+        <div class="after-now">
+          <div class="now-row" bind:this={nowEl}>
+            {#if room.current}
+              <ul class="list">
+                <li class="playing" class:mine={room.current.userId === userId}>
+                  <span class="idx">{room.player.paused ? '⏸' : '♪'}</span>
+                  <div class="song">
+                    <Marquee class="title" text={room.current.title} />
+                    <Marquee class="sub" text={room.current.artist || t('common.unknownArtist')} />
+                  </div>
+                  <span class="who">{room.current.nickname}</span>
+                  {@render star({ id: room.current.songId, title: room.current.title, artist: room.current.artist })}
+                </li>
+              </ul>
+            {/if}
+          </div>
+
+          {#if room.queue.length === 0}
+            <p class="muted empty">{t('room.queueEmpty')}</p>
           {:else}
-            <p class="muted">{t('room.nothingPlaying')}</p>
+            <ol class="list upcoming">
+              {#each room.queue as item, i (item.id)}
+                <li class:mine={item.userId === userId}>
+                  <span class="idx">{i + 1}</span>
+                  <div class="song">
+                    <Marquee class="title" text={item.title} />
+                    <Marquee class="sub" text={item.artist || t('common.unknownArtist')} />
+                  </div>
+                  <span class="who">{item.nickname}</span>
+                  {@render star({ id: item.songId, title: item.title, artist: item.artist })}
+                  <button class="ghost small icon" onclick={() => queueMenu(item, i)} aria-label={t('room.songMenu')}>⋯</button>
+                </li>
+              {/each}
+            </ol>
           {/if}
         </div>
-
-        <div class="divider">{t('room.upNext')}</div>
-        {#if room.queue.length === 0}
-          <p class="muted empty">{t('room.queueEmpty')}</p>
-        {:else}
-          <ol class="list">
-            {#each room.queue as item, i (item.id)}
-              <li class:mine={item.userId === userId}>
-                <span class="idx">{i + 1}</span>
-                <div class="song">
-                  <Marquee class="title" text={item.title} />
-                  <Marquee class="sub" text={item.artist || t('common.unknownArtist')} />
-                </div>
-                <span class="who">{item.nickname}</span>
-                {@render star({ id: item.songId, title: item.title, artist: item.artist })}
-                <button class="ghost small icon" onclick={() => queueMenu(item, i)} aria-label={t('room.songMenu')}>⋯</button>
-              </li>
-            {/each}
-          </ol>
-        {/if}
-        <!-- Room to scroll the current song to the top even when little follows it. -->
-        <div class="tail"></div>
-      </section>
-    {/if}
+      {/if}
+    </div>
   </div>
 
   {#if showQRCode}
@@ -521,39 +539,61 @@
 {/if}
 
 <style>
-  .page {
+  /* Full-height column: fixed top + one scrolling list. */
+  .app {
+    height: 100dvh;
     max-width: 640px;
     margin: 0 auto;
-    padding: 12px var(--gutter) calc(80px + env(safe-area-inset-bottom));
+    display: flex;
+    flex-direction: column;
+  }
+  .top {
+    flex: none;
     display: grid;
-    /* minmax(0, …) lets long, non-wrapping titles shrink instead of widening the page. */
     grid-template-columns: minmax(0, 1fr);
-    gap: 12px;
+    gap: 6px;
+    padding: 6px var(--gutter) 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .scroller {
+    flex: 1;
+    min-height: 0;
+    position: relative; /* offsetTop of rows is relative to this */
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0 var(--gutter) env(safe-area-inset-bottom);
   }
   header {
-    gap: 4px;
+    gap: 2px;
   }
   .room-name {
     flex: 1;
     min-width: 0;
-    font-size: 1.25rem;
+    font-size: 1.1rem;
     font-weight: 700;
+  }
+  .top button {
+    min-height: 34px;
+    padding-top: 4px;
+    padding-bottom: 4px;
   }
   .icon {
-    min-width: 36px;
+    min-width: 34px;
     font-weight: 700;
+    padding-left: 6px;
+    padding-right: 6px;
   }
   .nick {
-    max-width: 30%;
+    max-width: 28%;
     min-width: 0;
     display: block;
   }
   .banner {
     background: var(--accent-soft);
     color: var(--accent);
-    border-radius: 10px;
-    padding: 8px 12px;
-    font-size: 0.9rem;
+    border-radius: 8px;
+    padding: 4px 10px;
+    font-size: 0.85rem;
   }
   .error {
     color: var(--danger);
@@ -561,52 +601,40 @@
   }
   .now {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    background: var(--accent-soft);
+    border-radius: var(--radius);
+    padding: 8px 10px;
+  }
+  .now.idle {
+    background: var(--surface);
+  }
+  .now-line {
     gap: 8px;
-    min-width: 0;
   }
-  .now .label {
-    font-size: 0.8rem;
+  .note {
+    color: var(--accent);
+    font-size: 1.1rem;
   }
-  /* Pause, restart and skip: same size, same weight, side by side. */
+  .nothing {
+    font-size: 0.9rem;
+  }
+  /* Pause, restart and skip: same size, same weight, side by side; "⋯" is narrower. */
   .transport {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-  }
-  .transport.single {
     grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
   }
-  .controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
+  .transport.mine {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
   }
-  .volume {
-    flex: 1 1 160px;
-    font-size: 0.85rem;
+  .transport button {
+    font-size: 0.9rem;
   }
-  .volume span {
-    white-space: nowrap;
-  }
-  .volume input {
-    min-height: 32px;
-    padding: 0;
-    border: none;
-    background: none;
-    accent-color: var(--accent);
-  }
-  .star {
-    font-size: 1.2rem;
-    color: var(--muted);
-    padding: 4px 6px;
-    flex: none;
-  }
-  .star.on {
-    color: var(--accent);
-  }
-  .hint {
-    font-size: 0.8rem;
-    text-align: center;
+  .transport .more {
+    min-width: 40px;
+    font-weight: 700;
   }
   .tabs {
     display: grid;
@@ -614,12 +642,7 @@
     gap: 4px;
     background: var(--surface);
     border-radius: var(--radius);
-    padding: 4px;
-    position: sticky;
-    top: 0;
-    z-index: 5;
-    /* Hide list content scrolling underneath, including the gap above the bar. */
-    box-shadow: 0 -12px 0 var(--bg), 0 8px 12px var(--bg);
+    padding: 3px;
   }
   .tabs button {
     border: none;
@@ -629,11 +652,22 @@
     background: var(--surface-2);
     font-weight: 600;
   }
-  section {
-    min-width: 0;
+  .top input[type='search'] {
+    min-height: 38px;
+    padding-top: 6px;
+    padding-bottom: 6px;
   }
-  section > input {
-    margin-bottom: 4px;
+  .star {
+    font-size: 1.2rem;
+    color: var(--muted);
+    padding: 4px 6px;
+  }
+  .star.on {
+    color: var(--accent);
+  }
+  .hint {
+    font-size: 0.8rem;
+    text-align: center;
   }
   .list > li > :global(*) {
     flex-shrink: 0;
@@ -666,27 +700,27 @@
   li.mine :global(.title) {
     color: var(--accent);
   }
+  /* History: dimmed and grey, so it reads as "already sung". */
   .history li {
-    opacity: 0.65;
+    opacity: 0.5;
   }
+  .history li :global(.title) {
+    font-weight: 400;
+    color: var(--muted);
+  }
+  /* Current song: accent background, the anchor of the list. */
   li.playing {
     background: var(--accent-soft);
     border-radius: 10px;
+    border-bottom: none;
     padding-left: 8px;
     padding-right: 8px;
   }
-  .divider {
-    font-size: 0.75rem;
-    letter-spacing: 0.1em;
-    color: var(--muted);
-    padding: 12px 0 2px;
+  li.playing .idx {
+    color: var(--accent);
   }
-  .now-row {
-    /* Keep the sticky tabs from covering it after scrollIntoView. */
-    scroll-margin-top: 64px;
-  }
-  .tail {
-    min-height: calc(100dvh - 160px);
+  .after-now {
+    min-height: 100%;
   }
   .empty {
     text-align: center;
@@ -694,7 +728,7 @@
   }
   .load-more {
     width: 100%;
-    margin-top: 8px;
+    margin: 8px 0;
   }
   .qr-backdrop {
     position: fixed;
