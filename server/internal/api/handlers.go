@@ -528,3 +528,72 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Write([]byte("ok"))
 }
+
+// handleRoomHistory serves the room's recent history to members (and admins).
+func (s *Server) handleRoomHistory(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, admin, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	if !admin {
+		if _, err := rm.Nickname(userID); err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
+	h, err := s.rooms.History(rm.ID, 100)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h)
+}
+
+func (s *Server) handleReorder(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, admin, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	itemID, err := pathInt(r, "item")
+	if err != nil {
+		writeErr(w, room.ErrInvalid)
+		return
+	}
+	var body struct {
+		To string `json:"to"` // "up" or "top"
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := rm.Reorder(itemID, body.To, userID, admin); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w)
+}
+
+func (s *Server) handleReplayAll(w http.ResponseWriter, r *http.Request) {
+	rm, ok := s.room(w, r)
+	if !ok {
+		return
+	}
+	userID, admin, ok := s.actor(w, r)
+	if !ok {
+		return
+	}
+	n, err := rm.ReplayAll(userID, admin)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"queued": n})
+}

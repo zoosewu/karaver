@@ -476,3 +476,125 @@ func TestVolumeWrittenOnFlush(t *testing.T) {
 		t.Fatalf("after flush: volume=%d qr=%v", vol, qr)
 	}
 }
+
+func idOf(r *Room, user string, song int64) int64 {
+	for _, it := range r.queue {
+		if it.UserID == user && it.SongID == song {
+			return it.ID
+		}
+	}
+	return -1
+}
+
+func TestReorderFIFO(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	mustEnqueue(t, r, "a", 1) // playing
+	mustEnqueue(t, r, "a", 2)
+	mustEnqueue(t, r, "b", 3)
+	mustEnqueue(t, r, "c", 4)
+
+	// Any member may move anyone's song.
+	if err := r.Reorder(idOf(r, "c", 4), "up", "b", false); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, order(r), "a2", "c4", "b3")
+	if err := r.Reorder(idOf(r, "b", 3), "top", "c", false); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, order(r), "b3", "a2", "c4")
+	// Already first: no-op. Non-members and bad directions are rejected.
+	if err := r.Reorder(idOf(r, "b", 3), "up", "a", false); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, order(r), "b3", "a2", "c4")
+	if err := r.Reorder(idOf(r, "a", 2), "up", "zzz", false); !errors.Is(err, ErrNotMember) {
+		t.Fatalf("stranger: %v", err)
+	}
+	if err := r.Reorder(idOf(r, "a", 2), "down", "a", false); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("bad direction: %v", err)
+	}
+	if err := r.Reorder(999, "up", "a", false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing item: %v", err)
+	}
+}
+
+func TestReorderRoundRobin(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeRoundRobin)
+	mustEnqueue(t, r, "c", 9) // c sings first, so a and b lead the rounds
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "a", 2)
+	mustEnqueue(t, r, "a", 3)
+	mustEnqueue(t, r, "b", 4)
+	mustEnqueue(t, r, "b", 5)
+	eq(t, order(r), "a1", "b4", "a2", "b5", "a3")
+
+	// Only your own songs, and only among themselves: the rounds stay fair.
+	if err := r.Reorder(idOf(r, "a", 3), "top", "b", false); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("other's song: %v", err)
+	}
+	if err := r.Reorder(idOf(r, "a", 3), "top", "a", false); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, order(r), "a3", "b4", "a1", "b5", "a2")
+	if err := r.Reorder(idOf(r, "a", 2), "up", "a", false); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, order(r), "a3", "b4", "a2", "b5", "a1")
+	// Admins may reorder anyone's songs, still within that person's set.
+	if err := r.Reorder(idOf(r, "b", 5), "top", "", true); err != nil {
+		t.Fatal(err)
+	}
+	eq(t, order(r), "a3", "b5", "a2", "b4", "a1")
+}
+
+func TestReplayAll(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	if _, err := r.ReplayAll("a", false); !errors.Is(err, ErrNoHistory) {
+		t.Fatalf("empty history: %v", err)
+	}
+	mustEnqueue(t, r, "a", 1)
+	mustEnqueue(t, r, "b", 2)
+	mustEnqueue(t, r, "c", 3)
+	mustEnqueue(t, r, "a", 4)
+	if _, err := r.ReplayAll("a", false); !errors.Is(err, ErrQueueNotEmpty) {
+		t.Fatalf("queue not empty: %v", err)
+	}
+	for range 3 {
+		finishCurrent(t, r) // a1, b2, c3 done; a4 now playing
+	}
+	if err := r.Kick("c"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Kick("c"); err != nil { // idempotent enough for the test
+		t.Fatal(err)
+	}
+	n, err := r.ReplayAll("b", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a1 and b2 come back under their original requesters; c3 (kicked) is
+	// skipped, and a4 is skipped because it is playing right now.
+	if n != 2 {
+		t.Fatalf("queued %d, want 2", n)
+	}
+	eq(t, order(r), "a1", "b2")
+	if current(r) != "a4" {
+		t.Fatalf("current = %s", current(r))
+	}
+
+	// A song sung twice is queued once.
+	finishCurrent(t, r) // a4 done, a1 (replayed) playing
+	finishCurrent(t, r) // a1 done, b2 playing
+	finishCurrent(t, r) // b2 done, nothing left
+	n, err = r.ReplayAll("a", false)
+	if err != nil || n != 3 {
+		t.Fatalf("second replay: n=%d err=%v", n, err)
+	}
+	if current(r) != "a1" { // nothing was playing, so the first one starts
+		t.Fatalf("current after replay = %s", current(r))
+	}
+	eq(t, order(r), "b2", "a4")
+}

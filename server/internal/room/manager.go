@@ -185,20 +185,24 @@ func (m *Manager) Delete(id string) error {
 
 // HistoryEntry is a finished song for the admin history list.
 type HistoryEntry struct {
+	ID        int64  `json:"id"`
+	SongID    int64  `json:"songId"`
 	Title     string `json:"title"`
 	Artist    string `json:"artist"`
+	UserID    string `json:"userId"`
 	Nickname  string `json:"nickname"`
 	Status    string `json:"status"`
 	StartedAt int64  `json:"startedAt"`
+	Present   bool   `json:"present"` // still in the library, so it can be queued again
 }
 
 func (m *Manager) History(roomID string, limit int) ([]HistoryEntry, error) {
-	rows, err := m.db.Query(`SELECT s.title, s.artist, COALESCE(rm.nickname, ''), q.status, q.started_at
+	rows, err := m.db.Query(`SELECT q.id, q.song_id, s.title, s.artist, q.user_id, COALESCE(rm.nickname, ''), q.status, q.started_at, s.present
 		FROM queue_items q
 		JOIN songs s ON s.id = q.song_id
 		LEFT JOIN room_members rm ON rm.room_id = q.room_id AND rm.user_id = q.user_id
 		WHERE q.room_id = ? AND q.status IN ('done', 'skipped', 'failed')
-		ORDER BY q.started_at DESC LIMIT ?`, roomID, limit)
+		ORDER BY q.started_at DESC, q.id DESC LIMIT ?`, roomID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +210,7 @@ func (m *Manager) History(roomID string, limit int) ([]HistoryEntry, error) {
 	out := []HistoryEntry{}
 	for rows.Next() {
 		var h HistoryEntry
-		if err := rows.Scan(&h.Title, &h.Artist, &h.Nickname, &h.Status, &h.StartedAt); err != nil {
+		if err := rows.Scan(&h.ID, &h.SongID, &h.Title, &h.Artist, &h.UserID, &h.Nickname, &h.Status, &h.StartedAt, &h.Present); err != nil {
 			return nil, err
 		}
 		out = append(out, h)

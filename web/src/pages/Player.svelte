@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
+  import Marquee from '../components/Marquee.svelte'
   import { api } from '../lib/api'
   import { t } from '../lib/i18n'
   import { toast } from '../lib/toast.svelte'
@@ -281,7 +282,7 @@
           {#if upNext}
             <div class="next">
               <div class="kicker">{t('player.comingUp')}</div>
-              <div class="ellipsis">{upNext.title}</div>
+              <Marquee text={upNext.title} />
               <div class="ellipsis small">{upNext.nickname}</div>
             </div>
           {/if}
@@ -399,15 +400,17 @@
     color: #aaa;
     margin: 0;
   }
+  /* Middle of the left edge: karaoke lyrics sit along the bottom, so keep clear of them. */
   .overlay {
     position: absolute;
-    right: 2vw;
-    bottom: 3vh;
+    left: 2vw;
+    top: 50%;
+    transform: translateY(-50%);
     display: flex;
-    align-items: flex-end;
-    gap: 1.5vw;
-    max-width: 40vw;
-    flex-direction: row-reverse;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1.5vh;
+    width: 22vw;
   }
   .overlay img {
     width: 14vh;
@@ -423,6 +426,7 @@
     border-radius: 1vh;
     font-size: 2.4vh;
     min-width: 0;
+    max-width: 100%;
   }
   .next .small {
     font-size: 2vh;

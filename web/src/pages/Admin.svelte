@@ -173,7 +173,7 @@
 <style>
   .layout {
     display: grid;
-    grid-template-columns: minmax(280px, 360px) 1fr;
+    grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
     gap: 16px;
     max-width: 1280px;
     margin: 0 auto;
@@ -222,7 +222,7 @@
   }
   @media (max-width: 800px) {
     .layout {
-      grid-template-columns: 1fr;
+      grid-template-columns: minmax(0, 1fr);
     }
     .sidebar {
       position: static;

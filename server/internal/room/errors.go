@@ -25,6 +25,8 @@ var (
 	ErrNotCurrent       = &Error{409, "not_current"}
 	ErrReorderNeedsFIFO = &Error{409, "reorder_requires_fifo"}
 	ErrNoOriginal       = &Error{409, "no_original"}
+	ErrQueueNotEmpty    = &Error{409, "queue_not_empty"}
+	ErrNoHistory        = &Error{409, "no_history"}
 	ErrPlayerExists     = &Error{409, "player_exists"}
 	ErrPairCode         = &Error{404, "pair_code_invalid"}
 	ErrInternal         = &Error{500, "internal"}

@@ -133,14 +133,23 @@ func (r *Room) orderedLocked() []*Item {
 
 // renumberLocked persists the given order as positions 0..n-1.
 func (r *Room) renumberLocked(order []*Item) error {
+	pos := make([]int64, len(order))
+	for i := range pos {
+		pos[i] = int64(i)
+	}
+	return r.setPositionsLocked(order, pos)
+}
+
+// setPositionsLocked gives items[i] position pos[i], in the database and in memory.
+func (r *Room) setPositionsLocked(items []*Item, pos []int64) error {
 	tx, err := r.m.db.Begin()
 	if err != nil {
 		log.Printf("room %s: db: %v", r.ID, err)
 		return ErrInternal
 	}
 	defer tx.Rollback()
-	for i, it := range order {
-		if _, err := tx.Exec(`UPDATE queue_items SET position=? WHERE id=?`, i, it.ID); err != nil {
+	for i, it := range items {
+		if _, err := tx.Exec(`UPDATE queue_items SET position=? WHERE id=?`, pos[i], it.ID); err != nil {
 			log.Printf("room %s: db: %v", r.ID, err)
 			return ErrInternal
 		}
@@ -149,8 +158,8 @@ func (r *Room) renumberLocked(order []*Item) error {
 		log.Printf("room %s: db: %v", r.ID, err)
 		return ErrInternal
 	}
-	for i, it := range order {
-		it.Position = int64(i)
+	for i, it := range items {
+		it.Position = pos[i]
 	}
 	return nil
 }
@@ -483,6 +492,157 @@ func (r *Room) UpdateSettings(s Settings) error {
 	r.settings = s
 	r.broadcastLocked()
 	return nil
+}
+
+// Reorder moves a queued item one place up (to == "up") or to the top ("top").
+//
+// FIFO: any member may move any song within the whole queue.
+// Round-robin: the play order is computed, so a member may only reorder their
+// own songs among themselves (admins: anyone's, still within that person's
+// songs). The person's set of positions is kept, so nobody jumps the line.
+func (r *Room) Reorder(itemID int64, to, userID string, admin bool) error {
+	if to != "up" && to != "top" {
+		return ErrInvalid
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !admin {
+		if err := r.checkMemberLocked(userID); err != nil {
+			return err
+		}
+	}
+	target := func(idx int) int {
+		if to == "top" {
+			return 0
+		}
+		return idx - 1
+	}
+
+	if r.settings.Mode == ModeFIFO {
+		order := r.orderedLocked()
+		idx := slices.IndexFunc(order, func(it *Item) bool { return it.ID == itemID })
+		if idx < 0 {
+			return ErrNotFound
+		}
+		if idx == 0 {
+			return nil
+		}
+		it := order[idx]
+		order = slices.Insert(slices.Delete(order, idx, idx+1), target(idx), it)
+		if err := r.renumberLocked(order); err != nil {
+			return err
+		}
+	} else {
+		i := slices.IndexFunc(r.queue, func(it *Item) bool { return it.ID == itemID })
+		if i < 0 {
+			return ErrNotFound
+		}
+		owner := r.queue[i].UserID
+		if !admin && owner != userID {
+			return ErrForbidden
+		}
+		var own []*Item
+		for _, it := range r.queue {
+			if it.UserID == owner {
+				own = append(own, it)
+			}
+		}
+		slices.SortFunc(own, func(a, b *Item) int { return int(a.Position - b.Position) })
+		pos := make([]int64, len(own))
+		for k, it := range own {
+			pos[k] = it.Position
+		}
+		idx := slices.IndexFunc(own, func(it *Item) bool { return it.ID == itemID })
+		if idx == 0 {
+			return nil
+		}
+		it := own[idx]
+		own = slices.Insert(slices.Delete(own, idx, idx+1), target(idx), it)
+		if err := r.setPositionsLocked(own, pos); err != nil {
+			return err
+		}
+	}
+	r.touch()
+	r.broadcastLocked()
+	return nil
+}
+
+// ReplayAll queues every song from the room's history again, oldest first,
+// under whoever originally requested it. Only allowed while nothing is waiting
+// in the queue. Songs no longer in the library, the song playing right now,
+// repeats, and songs of members who were kicked are skipped. Returns how many
+// songs were queued.
+func (r *Room) ReplayAll(userID string, admin bool) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !admin {
+		if err := r.checkMemberLocked(userID); err != nil {
+			return 0, err
+		}
+	}
+	if len(r.queue) > 0 {
+		return 0, ErrQueueNotEmpty
+	}
+	rows, err := r.m.db.Query(`SELECT q.song_id, q.user_id, s.title, s.artist, s.original_path != ''
+		FROM queue_items q JOIN songs s ON s.id = q.song_id
+		WHERE q.room_id = ? AND q.status IN ('done', 'skipped', 'failed') AND s.present = 1
+		ORDER BY q.started_at, q.id`, r.ID)
+	if err != nil {
+		log.Printf("room %s: db: %v", r.ID, err)
+		return 0, ErrInternal
+	}
+	seen := map[int64]bool{}
+	if r.current != nil {
+		seen[r.current.SongID] = true
+	}
+	var items []*Item
+	for rows.Next() {
+		it := &Item{}
+		if err := rows.Scan(&it.SongID, &it.UserID, &it.Title, &it.Artist, &it.HasOriginal); err != nil {
+			rows.Close()
+			log.Printf("room %s: db: %v", r.ID, err)
+			return 0, ErrInternal
+		}
+		if mem, ok := r.members[it.UserID]; seen[it.SongID] || !ok || mem.Banned {
+			continue
+		}
+		seen[it.SongID] = true
+		items = append(items, it)
+	}
+	rows.Close()
+	if len(items) == 0 {
+		return 0, ErrNoHistory
+	}
+
+	tx, err := r.m.db.Begin()
+	if err != nil {
+		log.Printf("room %s: db: %v", r.ID, err)
+		return 0, ErrInternal
+	}
+	defer tx.Rollback()
+	t := now()
+	pos := r.nextPos
+	for _, it := range items {
+		it.Position, it.CreatedAt = pos, t
+		pos++
+		res, err := tx.Exec(`INSERT INTO queue_items(room_id, song_id, user_id, status, position, created_at) VALUES(?,?,?,'queued',?,?)`,
+			r.ID, it.SongID, it.UserID, it.Position, it.CreatedAt)
+		if err != nil {
+			log.Printf("room %s: db: %v", r.ID, err)
+			return 0, ErrInternal
+		}
+		it.ID, _ = res.LastInsertId()
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("room %s: db: %v", r.ID, err)
+		return 0, ErrInternal
+	}
+	r.nextPos = pos
+	r.queue = append(r.queue, items...)
+	r.touch()
+	r.advanceLocked()
+	r.broadcastLocked()
+	return len(items), nil
 }
 
 // Move places a queued item at index (0-based) of the play order. FIFO only.

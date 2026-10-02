@@ -1,6 +1,7 @@
 <script lang="ts">
   import { router } from './lib/router.svelte'
   import Toasts from './components/Toasts.svelte'
+  import Dialogs from './components/Dialogs.svelte'
   import Home from './pages/Home.svelte'
   import Room from './pages/Room.svelte'
   import Player from './pages/Player.svelte'
@@ -23,3 +24,4 @@
 {/if}
 
 <Toasts />
+<Dialogs />

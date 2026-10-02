@@ -1,5 +1,7 @@
 <script lang="ts">
+  import Marquee from './Marquee.svelte'
   import PairTV from './PairTV.svelte'
+  import { ask, askTwice } from '../lib/dialog.svelte'
   import { api, errorCode } from '../lib/api'
   import { errorText, t } from '../lib/i18n'
   import { toast } from '../lib/toast.svelte'
@@ -48,17 +50,27 @@
   }
 
   const move = (itemId: number, index: number) => act(() => api('POST', `${base}/move`, { itemId, index }))
-  const remove = (itemId: number) => act(() => api('DELETE', `/api/rooms/${roomId}/queue/${itemId}`))
-  const skip = (itemId: number) => act(() => api('POST', `/api/rooms/${roomId}/skip`, { itemId }))
+  async function remove(itemId: number, title: string) {
+    if (await askTwice(t('room.removeConfirm', { title }), t('room.removeConfirm2', { title })))
+      act(() => api('DELETE', `/api/rooms/${roomId}/queue/${itemId}`))
+  }
+  async function skip(itemId: number, title: string) {
+    if (await ask(t('room.skipConfirm', { title }), { danger: true }))
+      act(() => api('POST', `/api/rooms/${roomId}/skip`, { itemId }))
+  }
+  async function confirmControl(action: 'pause' | 'restart', title: string) {
+    const msg = action === 'pause' ? t('room.pauseConfirm', { title }) : t('room.restartConfirm', { title })
+    if (await ask(msg)) control(action)
+  }
   const control = (action: string, value = 0) => act(() => api('POST', `/api/rooms/${roomId}/control`, { action, value }))
   const unban = (userId: string) => act(() => api('POST', `${base}/unban`, { userId }))
 
-  function kick(userId: string, name: string) {
-    if (confirm(t('admin.kickConfirm', { name }))) act(() => api('POST', `${base}/kick`, { userId }))
+  async function kick(userId: string, name: string) {
+    if (await ask(t('admin.kickConfirm', { name }), { danger: true })) act(() => api('POST', `${base}/kick`, { userId }))
   }
 
-  function kickPlayer(playerId: string) {
-    if (confirm(t('admin.kickPlayerConfirm'))) act(() => api('POST', `${base}/players/kick`, { playerId }))
+  async function kickPlayer(playerId: string) {
+    if (await ask(t('admin.kickPlayerConfirm'), { danger: true })) act(() => api('POST', `${base}/players/kick`, { playerId }))
   }
 
   // Just enough to tell a TV browser from a laptop; not meant to be exact.
@@ -70,12 +82,12 @@
     return [br, os].filter(Boolean).join(' / ') || ua.slice(0, 40)
   }
 
-  function clearQueue() {
-    if (confirm(t('admin.clearConfirm'))) act(() => api('POST', `${base}/clear`))
+  async function clearQueue() {
+    if (await askTwice(t('admin.clearConfirm'), t('admin.clearConfirm2'))) act(() => api('POST', `${base}/clear`))
   }
 
   async function deleteRoom() {
-    if (!room || !confirm(t('admin.deleteConfirm', { name: room.settings.name }))) return
+    if (!room || !(await askTwice(t('admin.deleteConfirm', { name: room.settings.name }), t('admin.deleteConfirm2')))) return
     if (await act(() => api('DELETE', base))) {
       onchange()
       onclose()
@@ -106,18 +118,18 @@
       {#if room.current}
         <div class="row">
           <div class="song">
-            <div class="title ellipsis">{room.current.title}</div>
-            <div class="sub ellipsis">{room.current.artist} · {room.current.nickname}</div>
+            <Marquee class="title" text={room.current.title} />
+            <Marquee class="sub" text={`${room.current.artist} · ${room.current.nickname}`} />
           </div>
-          <button class="danger" onclick={() => skip(room!.current!.id)}>{t('room.skip')}</button>
+          <button class="danger" onclick={() => skip(room!.current!.id, room!.current!.title)}>{t('room.skip')}</button>
         </div>
         <div class="row wrap">
           {#if room.player.paused}
             <button class="small" onclick={() => control('play')}>▶ {t('room.play')}</button>
           {:else}
-            <button class="small" onclick={() => control('pause')}>⏸ {t('room.pause')}</button>
+            <button class="small" onclick={() => confirmControl('pause', room!.current!.title)}>⏸ {t('room.pause')}</button>
           {/if}
-          <button class="small" onclick={() => control('restart')}>⟲ {t('room.restart')}</button>
+          <button class="small" onclick={() => confirmControl('restart', room!.current!.title)}>⟲ {t('room.restart')}</button>
           {#if room.current.hasOriginal}
             <button class="small" onclick={() => control('vocal', room!.player.vocal ? 0 : 1)}>
               🎤 {room.player.vocal ? t('room.vocalSwitchOff') : t('room.vocalSwitchOn')}
@@ -181,8 +193,8 @@
             <li>
               <span class="idx">{i + 1}</span>
               <div class="song">
-                <div class="title ellipsis">{item.title}</div>
-                <div class="sub ellipsis">{item.artist} · {item.nickname}</div>
+                <Marquee class="title" text={item.title} />
+                <Marquee class="sub" text={`${item.artist} · ${item.nickname}`} />
               </div>
               {#if room.settings.mode === 'fifo'}
                 <button class="ghost small" disabled={i === 0} onclick={() => move(item.id, 0)} title={t('admin.moveTop')}>⤒</button>
@@ -194,7 +206,7 @@
                   title={t('admin.moveDown')}>↓</button
                 >
               {/if}
-              <button class="ghost small danger" onclick={() => remove(item.id)} title={t('common.delete')}>✕</button>
+              <button class="ghost small danger" onclick={() => remove(item.id, item.title)} title={t('common.delete')}>✕</button>
             </li>
           {/each}
         </ol>
@@ -279,8 +291,8 @@
               <li>
                 <span class="muted small time">{fmtTime(h.startedAt)}</span>
                 <div class="song">
-                  <div class="title ellipsis">{h.title}</div>
-                  <div class="sub ellipsis">{h.artist} · {h.nickname}</div>
+                  <Marquee class="title" text={h.title} />
+                  <Marquee class="sub" text={`${h.artist} · ${h.nickname}`} />
                 </div>
                 <span class="badge">{t(`admin.status.${h.status}`)}</span>
               </li>
@@ -301,6 +313,7 @@
 <style>
   .grid {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 12px;
   }
   .head h2 {

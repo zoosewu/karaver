@@ -71,11 +71,16 @@ export interface RoomSummary {
 }
 
 export interface HistoryEntry {
+  id: number
+  songId: number
   title: string
   artist: string
+  userId: string
   nickname: string
   status: 'done' | 'skipped' | 'failed'
   startedAt: number
+  /** still in the library, so it can be queued again */
+  present: boolean
 }
 
 export interface ScanResult {

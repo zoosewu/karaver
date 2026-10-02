@@ -125,6 +125,10 @@ label.field {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
+  min-width: 0;
+  /* Cards are often grids; without this their single column grows to fit a
+     long non-wrapping title and the card overflows the screen. */
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .muted {

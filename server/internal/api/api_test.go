@@ -406,3 +406,36 @@ func TestRoomNamesOverHTTP(t *testing.T) {
 		t.Fatalf("info = %+v", info)
 	}
 }
+
+func TestQueueManagementOverHTTP(t *testing.T) {
+	e := setup(t)
+	adm := e.admin()
+	id := e.newRoom(adm)
+	base := "/api/rooms/" + id
+	one, two := e.songID("one"), e.songID("two")
+	a, b := e.user(), e.user()
+	a.do("POST", base+"/join", map[string]string{"nickname": "A"}, 204, nil)
+	b.do("POST", base+"/join", map[string]string{"nickname": "B"}, 204, nil)
+	e.anon().do("GET", base+"/history", nil, 401, nil)
+	e.user().do("GET", base+"/history", nil, 403, nil) // not a member
+
+	a.do("POST", base+"/queue", map[string]int64{"songId": one}, 204, nil) // playing (item 1)
+	b.do("POST", base+"/queue", map[string]int64{"songId": two}, 204, nil) // queued (item 2)
+	a.do("POST", base+"/queue/2/move", map[string]string{"to": "top"}, 204, nil)
+	a.do("POST", base+"/queue/2/move", map[string]string{"to": "sideways"}, 400, nil)
+	a.do("DELETE", base+"/queue/2", nil, 403, nil)  // not A's song
+	a.do("POST", base+"/replay-all", nil, 409, nil) // queue not empty
+
+	b.do("POST", base+"/skip", map[string]int64{"itemId": 1}, 204, nil) // one -> history, two playing
+	b.do("POST", base+"/skip", map[string]int64{"itemId": 2}, 204, nil) // two -> history
+	var hist []room.HistoryEntry
+	a.do("GET", base+"/history", nil, 200, &hist)
+	if len(hist) != 2 || hist[0].SongID != two || hist[0].Nickname != "B" || !hist[0].Present {
+		t.Fatalf("history = %+v", hist)
+	}
+	var res struct{ Queued int }
+	a.do("POST", base+"/replay-all", nil, 200, &res)
+	if res.Queued != 2 {
+		t.Fatalf("replay queued %d", res.Queued)
+	}
+}
