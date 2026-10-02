@@ -20,15 +20,15 @@ RUN go mod download
 COPY server/ ./
 COPY --from=web /web/dist ./web/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/karaver .
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/zkaraver .
 
 # Alpine keeps the image small but still has a shell and busybox tools for
-# troubleshooting (`docker compose exec karaver sh`; `apk add sqlite` to inspect the DB).
+# troubleshooting (`docker compose exec zkaraver sh`; `apk add sqlite` to inspect the DB).
 # Runs as root so a bind-mounted ./data that Docker creates (root-owned) is writable;
 # set `user:` in compose to run as another uid if the directory is owned accordingly.
 FROM alpine:3.22
-COPY --from=server /out/karaver /usr/local/bin/karaver
+COPY --from=server /out/zkaraver /usr/local/bin/zkaraver
 ENV LISTEN=:8080 DATA_DIR=/data MEDIA_DIR=/media
 EXPOSE 8080
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["karaver", "healthcheck"]
-ENTRYPOINT ["karaver"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["zkaraver", "healthcheck"]
+ENTRYPOINT ["zkaraver"]

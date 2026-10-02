@@ -10,7 +10,7 @@ const dictionaries: Record<string, Dictionary> = {
 }
 
 function pickLocale(): string {
-  const candidates = [storage.get('karaver.locale'), ...navigator.languages]
+  const candidates = [storage.get('zkaraver.locale'), ...navigator.languages]
   for (const c of candidates) {
     if (c && dictionaries[c]) return c
   }

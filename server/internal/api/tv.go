@@ -13,7 +13,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"karaver/internal/room"
+	"zkaraver/internal/room"
 )
 
 // TV pairing: a TV opens /tv, gets a short code over a WebSocket and shows it.

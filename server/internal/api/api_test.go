@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,10 +21,10 @@ import (
 
 	"github.com/coder/websocket"
 
-	"karaver/internal/config"
-	"karaver/internal/db"
-	"karaver/internal/library"
-	"karaver/internal/room"
+	"zkaraver/internal/config"
+	"zkaraver/internal/db"
+	"zkaraver/internal/library"
+	"zkaraver/internal/room"
 )
 
 type env struct {
@@ -437,5 +440,74 @@ func TestQueueManagementOverHTTP(t *testing.T) {
 	a.do("POST", base+"/replay-all", nil, 200, &res)
 	if res.Queued != 2 {
 		t.Fatalf("replay queued %d", res.Queued)
+	}
+}
+
+func TestHistoryPaging(t *testing.T) {
+	e := setup(t)
+	adm := e.admin()
+	id := e.newRoom(adm)
+	base := "/api/rooms/" + id
+	u := e.user()
+	u.do("POST", base+"/join", map[string]string{"nickname": "U"}, 204, nil)
+	// Alternate two songs to build up 5 history entries.
+	songs := []int64{e.songID("one"), e.songID("two")}
+	for i := range 5 {
+		u.do("POST", base+"/queue", map[string]int64{"songId": songs[i%2]}, 204, nil)
+		u.do("POST", base+"/skip", map[string]int64{"itemId": int64(i + 1)}, 204, nil)
+	}
+	var page1, page2, page3 []room.HistoryEntry
+	u.do("GET", base+"/history?limit=2", nil, 200, &page1)
+	last := page1[len(page1)-1]
+	u.do("GET", fmt.Sprintf("%s/history?limit=2&before_started=%d&before_id=%d", base, last.StartedAt, last.ID), nil, 200, &page2)
+	last = page2[len(page2)-1]
+	u.do("GET", fmt.Sprintf("%s/history?limit=2&before_started=%d&before_id=%d", base, last.StartedAt, last.ID), nil, 200, &page3)
+	var ids []int64
+	for _, p := range [][]room.HistoryEntry{page1, page2, page3} {
+		for _, h := range p {
+			ids = append(ids, h.ID)
+		}
+	}
+	if fmt.Sprint(ids) != "[5 4 3 2 1]" {
+		t.Fatalf("paged ids = %v, want newest to oldest without gaps or repeats", ids)
+	}
+}
+
+func TestLegacyAdminCookie(t *testing.T) {
+	e := setup(t)
+	adm := e.admin()
+	u, _ := url.Parse(e.srv.URL)
+	var value string
+	for _, c := range adm.http.Jar.Cookies(u) {
+		if c.Name == adminCookie {
+			value = c.Value
+		}
+	}
+	// The same signed value under the pre-rename cookie name still works.
+	req, _ := http.NewRequest("GET", e.srv.URL+"/api/admin/rooms", nil)
+	req.AddCookie(&http.Cookie{Name: legacyAdminCookie, Value: value})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("legacy cookie: %d", resp.StatusCode)
+	}
+}
+
+func TestQRCodeHasLogo(t *testing.T) {
+	b, err := roomQR("http://ktv.test/r/living-room")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := png.Decode(bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The centre pixel belongs to the logo (coloured), not a black or white QR module.
+	c := color.RGBAModel.Convert(img.At(qrSize/2, qrSize/2)).(color.RGBA)
+	if c.R == c.G && c.G == c.B {
+		t.Fatalf("centre pixel %v does not look like the logo", c)
 	}
 }

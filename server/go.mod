@@ -1,4 +1,4 @@
-module karaver
+module zkaraver
 
 go 1.26.0
 

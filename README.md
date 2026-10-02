@@ -1,4 +1,6 @@
-# Karaver
+<p align="center"><img src="assets/zkaraver.svg" width="120" alt="zKaraver"></p>
+
+<h1 align="center">zKaraver</h1>
 
 自架的多房間卡拉 OK 點歌系統。手機掃 QR code 點歌，電視或電腦上開播放頁。
 
@@ -12,8 +14,8 @@
 
 ```yaml
 services:
-  karaver:
-    image: ghcr.io/zoosewu/karaver:latest
+  zkaraver:
+    image: ghcr.io/zoosewu/zkaraver:latest
     restart: unless-stopped
     ports:
       - "8080:8080"
@@ -52,8 +54,8 @@ docker compose up -d
 如果比較想把設定放在 `.env`，也可以直接使用 repo 裡的 [`docker-compose.yml`](docker-compose.yml) 搭配 [`.env.example`](.env.example)：
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/zoosewu/karaver/main/docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/zoosewu/karaver/main/.env.example -o .env
+curl -fsSLO https://raw.githubusercontent.com/zoosewu/zkaraver/main/docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/zoosewu/zkaraver/main/.env.example -o .env
 # 編輯 .env 後
 docker compose up -d
 ```
@@ -68,7 +70,17 @@ docker compose up -d
 docker compose pull && docker compose up -d
 ```
 
-Image 放在 `ghcr.io/zoosewu/karaver`，支援 `linux/amd64` 和 `linux/arm64`（例如樹莓派、ARM 架構的 NAS）。可用的標籤：
+### 從 Karaver 升級
+
+專案改名為 zKaraver，image 搬到 `ghcr.io/zoosewu/zkaraver`，compose 的服務名稱也改成 `zkaraver`。升級時換成新的 `docker-compose.yml`（或把 image 和服務名稱改掉），然後執行：
+
+```sh
+docker compose pull && docker compose up -d --remove-orphans
+```
+
+`--remove-orphans` 會移除舊名稱的容器。資料會自動搬過來：`./data/karaver.db` 在第一次啟動時改名為 `zkaraver.db`，手機上的暱稱、身分和主題設定會自動沿用，管理員也不用重新登入。
+
+Image 放在 `ghcr.io/zoosewu/zkaraver`，支援 `linux/amd64` 和 `linux/arm64`（例如樹莓派、ARM 架構的 NAS）。可用的標籤：
 
 | 標籤 | 內容 |
 |---|---|
@@ -76,7 +88,7 @@ Image 放在 `ghcr.io/zoosewu/karaver`，支援 `linux/amd64` 和 `linux/arm64`�
 | `1.2.3`、`1.2`、`1` | 發行版（推送 `v1.2.3` 這種 git tag 時產生） |
 | `sha-abc1234` | 特定 commit |
 
-要固定版本時，把 `image` 改成 `ghcr.io/zoosewu/karaver:1.2.3`；使用 `.env` 的話，則設定 `KARAVER_TAG=1.2.3`。
+要固定版本時，把 `image` 改成 `ghcr.io/zoosewu/zkaraver:1.2.3`；使用 `.env` 的話，則設定 `ZKARAVER_TAG=1.2.3`。
 
 如果想從原始碼自己建置：
 
@@ -104,8 +116,8 @@ Image 內建健康檢查（`/healthz`，同時檢查資料庫連線），`docker
 需要進容器查看狀況時（image 以 Alpine 為基底）：
 
 ```sh
-docker compose exec karaver sh
-# 例如：ls /media、ls -la /data，或 apk add sqlite 後執行 sqlite3 /data/karaver.db
+docker compose exec zkaraver sh
+# 例如：ls /media、ls -la /data，或 apk add sqlite 後執行 sqlite3 /data/zkaraver.db
 ```
 
 ### 曲庫

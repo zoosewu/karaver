@@ -14,12 +14,14 @@ import (
 	"strings"
 	"time"
 
-	"karaver/internal/db"
+	"zkaraver/internal/db"
 )
 
 const (
-	adminCookie = "karaver_admin"
-	adminTTL    = 30 * 24 * time.Hour
+	adminCookie = "zkaraver_admin"
+	// Cookie name before the rename to zKaraver; still accepted so admins stay logged in.
+	legacyAdminCookie = "karaver_admin"
+	adminTTL          = 30 * 24 * time.Hour
 )
 
 func loadSecret(d *sql.DB) ([]byte, error) {
@@ -51,7 +53,9 @@ func (s *Server) adminSig(exp int64) string {
 func (s *Server) isAdmin(r *http.Request) bool {
 	c, err := r.Cookie(adminCookie)
 	if err != nil {
-		return false
+		if c, err = r.Cookie(legacyAdminCookie); err != nil {
+			return false
+		}
 	}
 	expStr, sig, ok := strings.Cut(c.Value, ".")
 	if !ok {
@@ -88,7 +92,9 @@ func (s *Server) setAdminCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func clearAdminCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: adminCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	for _, name := range []string{adminCookie, legacyAdminCookie} {
+		http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true})
+	}
 }
 
 // ---- anonymous users: public id + secret bearer token ----

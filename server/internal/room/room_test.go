@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"karaver/internal/db"
+	"zkaraver/internal/db"
 )
 
 func setup(t *testing.T) (*sql.DB, *Manager) {

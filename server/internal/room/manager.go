@@ -196,13 +196,23 @@ type HistoryEntry struct {
 	Present   bool   `json:"present"` // still in the library, so it can be queued again
 }
 
-func (m *Manager) History(roomID string, limit int) ([]HistoryEntry, error) {
+// HistoryCursor pages through history from newest to oldest: zero value = newest
+// page; otherwise entries strictly older than (StartedAt, ID).
+type HistoryCursor struct {
+	StartedAt int64
+	ID        int64
+}
+
+// History returns finished songs, newest first.
+func (m *Manager) History(roomID string, limit int, before HistoryCursor) ([]HistoryEntry, error) {
 	rows, err := m.db.Query(`SELECT q.id, q.song_id, s.title, s.artist, q.user_id, COALESCE(rm.nickname, ''), q.status, q.started_at, s.present
 		FROM queue_items q
 		JOIN songs s ON s.id = q.song_id
 		LEFT JOIN room_members rm ON rm.room_id = q.room_id AND rm.user_id = q.user_id
 		WHERE q.room_id = ? AND q.status IN ('done', 'skipped', 'failed')
-		ORDER BY q.started_at DESC, q.id DESC LIMIT ?`, roomID, limit)
+		  AND (? = 0 OR q.started_at < ? OR (q.started_at = ? AND q.id < ?))
+		ORDER BY q.started_at DESC, q.id DESC LIMIT ?`,
+		roomID, before.ID, before.StartedAt, before.StartedAt, before.ID, limit)
 	if err != nil {
 		return nil, err
 	}

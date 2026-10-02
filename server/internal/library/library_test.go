@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"karaver/internal/config"
-	"karaver/internal/db"
+	"zkaraver/internal/config"
+	"zkaraver/internal/db"
 )
 
 func newLib(t *testing.T, cfg config.Config) (*Library, string) {

@@ -9,10 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/skip2/go-qrcode"
-
-	"karaver/internal/library"
-	"karaver/internal/room"
+	"zkaraver/internal/library"
+	"zkaraver/internal/room"
 )
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +113,7 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 	}
 	png, cached := s.qr.Load(rm.ID)
 	if !cached {
-		b, err := qrcode.Encode(s.cfg.PublicURL+"/r/"+rm.ID, qrcode.Medium, 512)
+		b, err := roomQR(s.cfg.PublicURL + "/r/" + rm.ID)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -362,7 +360,7 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h, err := s.rooms.History(rm.ID, 100)
+	h, err := s.rooms.History(rm.ID, 100, room.HistoryCursor{})
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -545,7 +543,16 @@ func (s *Server) handleRoomHistory(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	h, err := s.rooms.History(rm.ID, 100)
+	// Paged: ?limit=50&before_started=…&before_id=… for older entries.
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	var cur room.HistoryCursor
+	cur.StartedAt, _ = strconv.ParseInt(q.Get("before_started"), 10, 64)
+	cur.ID, _ = strconv.ParseInt(q.Get("before_id"), 10, 64)
+	h, err := s.rooms.History(rm.ID, limit, cur)
 	if err != nil {
 		writeErr(w, err)
 		return

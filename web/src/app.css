@@ -19,6 +19,22 @@
   -webkit-text-size-adjust: 100%;
 }
 
+/* Light theme: chosen per device in the room settings (stored locally). */
+:root[data-theme='light'] {
+  --bg: #f7f5fa;
+  --surface: #ffffff;
+  --surface-2: #efebf5;
+  --border: #ddd6e8;
+  --text: #1d1826;
+  --muted: #6b6278;
+  --accent: #d6336c;
+  --accent-text: #ffffff;
+  --accent-soft: rgba(214, 51, 108, 0.12);
+  --danger: #d64545;
+  --ok: #1f9d63;
+  color-scheme: light;
+}
+
 *,
 *::before,
 *::after {
@@ -80,6 +96,16 @@ button.primary {
 }
 button.primary:hover:not(:disabled) {
   filter: brightness(1.08);
+  border-color: var(--accent);
+}
+/* Tonal: an accent action that should not shout (e.g. the many 點歌 buttons). */
+button.tonal {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+  font-weight: 600;
+}
+button.tonal:hover:not(:disabled) {
   border-color: var(--accent);
 }
 button.danger {

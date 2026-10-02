@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"path"
@@ -14,9 +15,9 @@ import (
 	"strings"
 	"sync"
 
-	"karaver/internal/config"
-	"karaver/internal/library"
-	"karaver/internal/room"
+	"zkaraver/internal/config"
+	"zkaraver/internal/library"
+	"zkaraver/internal/room"
 )
 
 type Server struct {
@@ -29,6 +30,11 @@ type Server struct {
 	users  sync.Map // token hash -> user id
 	qr     sync.Map // room id -> PNG bytes
 	tv     *tvPairing
+}
+
+func init() {
+	// Not in Go's built-in table; browsers expect this for the PWA manifest.
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 }
 
 func New(cfg *config.Config, d *sql.DB, lib *library.Library, rooms *room.Manager, static fs.FS) (*Server, error) {

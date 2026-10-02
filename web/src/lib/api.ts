@@ -10,7 +10,7 @@ export class ApiError extends Error {
   }
 }
 
-const TOKEN_KEY = 'karaver.token'
+const TOKEN_KEY = 'zkaraver.token'
 
 export async function api<T = void>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {}

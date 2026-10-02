@@ -13,6 +13,7 @@
 
 <main class="center-screen">
   <div class="narrow">
+    <img class="logo" src="/favicon.svg" alt="" width="88" height="88" />
     <h1>{t('home.title')}</h1>
     <form class="row" onsubmit={go}>
       <input bind:value={code} placeholder={t('home.enterCode')} autocapitalize="off" autocomplete="off" />
@@ -23,3 +24,11 @@
     <a href="/admin" onclick={(e) => (e.preventDefault(), router.navigate('/admin'))}>{t('home.admin')}</a>
   </div>
 </main>
+
+<style>
+  .logo {
+    width: 88px;
+    height: 88px;
+    filter: drop-shadow(0 8px 20px rgb(0 0 0 / 0.3));
+  }
+</style>

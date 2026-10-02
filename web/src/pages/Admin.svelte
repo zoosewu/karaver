@@ -6,11 +6,12 @@
   import { errorText, t } from '../lib/i18n'
   import { storage } from '../lib/storage'
   import { toast } from '../lib/toast.svelte'
+  import { setTheme, themeState } from '../lib/theme.svelte'
   import type { RoomSummary, ScanResult } from '../lib/types'
 
   let phase = $state<'checking' | 'login' | 'ready'>('checking')
   let rooms = $state<RoomSummary[]>([])
-  let selected = $state<string | null>(storage.get('karaver.adminRoom'))
+  let selected = $state<string | null>(storage.get('zkaraver.adminRoom'))
   let newName = $state('')
   let library = $state<{ scanning: boolean; last: ScanResult | null; songs: number } | null>(null)
 
@@ -50,7 +51,7 @@
 
   function select(id: string | null) {
     selected = id
-    storage.set('karaver.adminRoom', id ?? '')
+    storage.set('zkaraver.adminRoom', id ?? '')
   }
 
   async function createRoom(e: SubmitEvent) {
@@ -90,6 +91,14 @@
       <header class="row">
         <h1>{t('admin.title')}</h1>
         <span class="spacer"></span>
+        <button
+          class="ghost small"
+          onclick={() => setTheme(themeState.current === 'dark' ? 'light' : 'dark')}
+          aria-label={themeState.current === 'dark' ? t('room.themeLight') : t('room.themeDark')}
+          title={themeState.current === 'dark' ? t('room.themeLight') : t('room.themeDark')}
+        >
+          {themeState.current === 'dark' ? '☀' : '🌙'}
+        </button>
         <button class="ghost small" onclick={logout}>{t('admin.logout')}</button>
       </header>
 

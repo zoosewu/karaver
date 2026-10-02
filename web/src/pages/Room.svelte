@@ -8,6 +8,7 @@
   import { router } from '../lib/router.svelte'
   import { storage } from '../lib/storage'
   import { toast } from '../lib/toast.svelte'
+  import { setTheme, themeState } from '../lib/theme.svelte'
   import { connectRoom } from '../lib/ws'
   import type { HistoryEntry, QueueItem, RoomState, Song } from '../lib/types'
 
@@ -16,7 +17,7 @@
   type Phase = 'loading' | 'notFound' | 'nickname' | 'ready' | 'kicked' | 'deleted' | 'error'
   let phase = $state<Phase>('loading')
   let userId = $state('')
-  let nickname = $state(storage.get('karaver.nickname') ?? '')
+  let nickname = $state(storage.get('zkaraver.nickname') ?? '')
   let nicknameError = $state('')
   let joining = $state(false)
   let room = $state<RoomState | null>(null)
@@ -49,7 +50,7 @@
     nicknameError = ''
     try {
       await api('POST', `/api/rooms/${roomId}/join`, { nickname: nickname.trim() })
-      storage.set('karaver.nickname', nickname.trim())
+      storage.set('zkaraver.nickname', nickname.trim())
       phase = 'ready'
     } catch (e) {
       const code = errorCode(e)
@@ -106,21 +107,65 @@
     return () => clearTimeout(timer)
   })
 
-  // ---- history (oldest first, shown above the current song) ----
+  // ---- history: oldest first, shown above the current song, loaded in pages ----
+  const HISTORY_PAGE = 50
   let history = $state<HistoryEntry[]>([])
+  let historyMore = $state(false) // older entries exist on the server
+  let historyLoading = false
 
-  async function loadHistory() {
+  const byTime = (a: HistoryEntry, b: HistoryEntry) => a.startedAt - b.startedAt || a.id - b.id
+
+  function mergeHistory(page: HistoryEntry[]) {
+    const all = new Map(history.map((h) => [h.id, h]))
+    for (const h of page) all.set(h.id, h)
+    history = [...all.values()].sort(byTime)
+  }
+
+  // Newest page: on entry, and whenever a song ends (that is what adds history).
+  async function loadNewestHistory() {
     try {
-      history = (await api<HistoryEntry[]>('GET', `/api/rooms/${roomId}/history`)).reverse()
+      const page = await api<HistoryEntry[]>('GET', `/api/rooms/${roomId}/history?limit=${HISTORY_PAGE}`)
+      const first = history.length === 0
+      mergeHistory(page)
+      if (first) historyMore = page.length === HISTORY_PAGE
     } catch {
       /* keep the old list */
     }
   }
 
-  // A song ending is what adds to the history, so refresh whenever the current song changes.
+  // Older page, when the user scrolls up near the top of the queue tab.
+  async function loadOlderHistory() {
+    if (historyLoading || !historyMore || history.length === 0) return
+    historyLoading = true
+    const oldest = history[0]
+    try {
+      const page = await api<HistoryEntry[]>(
+        'GET',
+        `/api/rooms/${roomId}/history?limit=${HISTORY_PAGE}&before_started=${oldest.startedAt}&before_id=${oldest.id}`,
+      )
+      historyMore = page.length === HISTORY_PAGE
+      const before = history.length
+      mergeHistory(page)
+      // Rows were added above the viewport: keep what the user is looking at in place.
+      if (scroller) scroller.scrollTop += (history.length - before) * ROW_H
+    } catch {
+      /* try again on the next scroll */
+    } finally {
+      historyLoading = false
+    }
+  }
+
   $effect(() => {
     void currentId
-    if (phase === 'ready') loadHistory()
+    if (phase === 'ready') loadNewestHistory()
+  })
+
+  // ---- "N more songs until your turn" ----
+  const turnText = $derived.by(() => {
+    if (!room || isMyTurn) return ''
+    const n = room.queue.findIndex((q) => q.userId === userId)
+    if (n < 0) return ''
+    return n === 0 ? t('room.turnNext') : t('room.turnIn', { n })
   })
 
   // ---- actions ----
@@ -212,7 +257,19 @@
 
   function roomMenu() {
     const available = history.length > 0 && (room?.queue.length ?? 0) === 0
+    const theme = themeState.current
     sheet(t('room.settings'), [
+      {
+        label: `🌙 ${t('room.themeDark')}${theme === 'dark' ? ' ✓' : ''}`,
+        disabled: theme === 'dark',
+        hint: t('room.themeHint'),
+        run: () => setTheme('dark'),
+      },
+      {
+        label: `☀ ${t('room.themeLight')}${theme === 'light' ? ' ✓' : ''}`,
+        disabled: theme === 'light',
+        run: () => setTheme('light'),
+      },
       {
         label: `⟲ ${t('room.replayAll')}`,
         disabled: !available,
@@ -220,7 +277,7 @@
         run: async () => {
           if (
             await askTwice(
-              t('room.replayAllConfirm', { n: history.length }),
+              t('room.replayAllConfirm'),
               t('room.replayAllConfirm2'),
               t('room.replayAll'),
             )
@@ -290,20 +347,57 @@
 
   // ---- the list area below the fixed top is the only thing that scrolls ----
   let scroller = $state<HTMLElement>()
-  let nowEl = $state<HTMLElement>()
+  let viewHeight = $state(0)
+  let scrollTop = $state(0)
+
+  // Queue tab: history + current + upcoming as one virtual list. Every row has
+  // the same height, so only the rows in view (plus a margin) are rendered.
+  const ROW_H = 60
+  const OVERSCAN = 6
+  type Row =
+    | { kind: 'history'; key: string; h: HistoryEntry }
+    | { kind: 'current'; key: string; item: QueueItem }
+    | { kind: 'queue'; key: string; item: QueueItem; index: number }
+
+  const rows = $derived.by((): Row[] => {
+    if (!room) return []
+    const out: Row[] = history.map((h) => ({ kind: 'history', key: `h${h.id}`, h }))
+    if (room.current) out.push({ kind: 'current', key: `c${room.current.id}`, item: room.current })
+    room.queue.forEach((item, index) => out.push({ kind: 'queue', key: `q${item.id}`, item, index }))
+    return out
+  })
+  // Index of the current song (or of the first upcoming one): where the tab opens.
+  const anchorIndex = $derived(history.length)
+  // Tall enough that the anchor row can always be scrolled to the very top.
+  const listHeight = $derived(Math.max(rows.length * ROW_H, anchorIndex * ROW_H + viewHeight))
+  const first = $derived(Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN))
+  const last = $derived(Math.min(rows.length, Math.ceil((scrollTop + viewHeight) / ROW_H) + OVERSCAN))
+  const visible = $derived(rows.slice(first, last))
+
+  let scrollFrame = 0
+  function onScroll() {
+    if (scrollFrame) return
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0
+      if (!scroller) return
+      scrollTop = scroller.scrollTop
+      // Lazy-load older history when the top of the list comes into view.
+      if (tab === 'queue' && scrollTop < ROW_H * 8) loadOlderHistory()
+    })
+  }
 
   async function switchTab(next: typeof tab) {
     tab = next
     await tick()
-    // Wait one frame so the new list (and the spacer below it) is laid out.
-    await new Promise(requestAnimationFrame)
     if (!scroller) return
-    if (next === 'queue' && nowEl) {
-      // The queue tab opens on the current song; history sits above it.
-      scroller.scrollTop += nowEl.getBoundingClientRect().top - scroller.getBoundingClientRect().top
-    } else {
-      scroller.scrollTop = 0
-    }
+    // The search box only exists on the search tab, so the list area just changed
+    // size; read it now instead of waiting for the resize observer, so the list
+    // is tall enough before we position it.
+    viewHeight = scroller.clientHeight
+    await tick()
+    // The queue tab opens on the current song; history sits above it.
+    scroller.scrollTop = next === 'queue' ? anchorIndex * ROW_H : 0
+    scrollTop = scroller.scrollTop
   }
 </script>
 
@@ -325,7 +419,7 @@
       <Marquee class="title" text={s.title} />
       <Marquee class="sub" text={s.artist || t('common.unknownArtist')} />
     </div>
-    <button class="primary small" disabled={queuedSongIds.has(s.id)} onclick={() => enqueue(s)}>
+    <button class="tonal small" disabled={queuedSongIds.has(s.id)} onclick={() => enqueue(s)}>
       {t('room.add')}
     </button>
   </li>
@@ -383,20 +477,21 @@
 
       <section class="now" class:idle={!room.current}>
         {#if room.current}
+          <!-- One line: song · artist · requester; scrolls when it does not fit. -->
           <div class="row now-line">
-            <span class="note" class:paused={room.player.paused}>{room.player.paused ? '⏸' : '♪'}</span>
-            <div class="song">
-              <Marquee class="title" text={room.current.title} />
-              <Marquee
-                class="sub"
-                text={`${room.current.artist || t('common.unknownArtist')} · ${t('room.sungBy', { name: room.current.nickname })}`}
-              />
+            <span class="note">{room.player.paused ? '⏸' : '♪'}</span>
+            <div class="now-text">
+              <Marquee>
+                <b>{room.current.title}</b>
+                <span class="muted"> · {room.current.artist || t('common.unknownArtist')} · {room.current.nickname}</span>
+              </Marquee>
             </div>
             {#if room.current.hasOriginal}
               <span class="badge" class:accent={room.player.vocal}>
                 {room.player.vocal ? t('room.vocalOn') : t('room.vocalOff')}
               </span>
             {/if}
+            {#if turnText}<span class="badge accent turn">{turnText}</span>{/if}
           </div>
           <div class="transport" class:mine={isMyTurn}>
             {#if isMyTurn}
@@ -436,7 +531,7 @@
     </div>
 
     <!-- The only scrolling region. -->
-    <div class="scroller" bind:this={scroller}>
+    <div class="scroller" bind:this={scroller} bind:clientHeight={viewHeight} onscroll={onScroll}>
       {#if tab === 'search'}
         <ul class="list">
           {#each results as s (s.id)}
@@ -463,62 +558,55 @@
         {/if}
         <p class="muted hint">{t('room.favoritesHint')}</p>
       {:else}
-        <!-- No section titles: history is dimmed, the current song is highlighted, upcoming is plain. -->
-        {#if history.length > 0}
-          <ul class="list history">
-            {#each history as h (h.id)}
-              <li>
-                <span class="idx"></span>
-                <div class="song">
-                  <Marquee class="title" text={h.title} />
-                  <Marquee
-                    class="sub"
-                    text={`${h.artist || t('common.unknownArtist')}${h.status !== 'done' ? ' · ' + t(`admin.status.${h.status}`) : ''}`}
-                  />
-                </div>
-                <span class="who">{h.nickname}</span>
-                {@render star({ id: h.songId, title: h.title, artist: h.artist })}
-                <button class="ghost small icon" onclick={() => historyMenu(h)} aria-label={t('room.songMenu')}>⋯</button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-
-        <!-- min-height: 100% leaves exactly enough room to scroll the current song to the top. -->
-        <div class="after-now">
-          <div class="now-row" bind:this={nowEl}>
-            {#if room.current}
-              <ul class="list">
-                <li class="playing" class:mine={room.current.userId === userId}>
-                  <span class="idx">{room.player.paused ? '⏸' : '♪'}</span>
+        <!-- Virtual list, no section titles: history is dimmed grey, the current
+             song is tinted, upcoming songs are plain. Only rows in view render. -->
+        <div class="vlist" style:height={`${listHeight}px`}>
+          <ol class="list rows" style:transform={`translateY(${first * ROW_H}px)`}>
+            {#each visible as row (row.key)}
+              {#if row.kind === 'history'}
+                {@const h = row.h}
+                <li class="history">
+                  <span class="idx"></span>
                   <div class="song">
-                    <Marquee class="title" text={room.current.title} />
-                    <Marquee class="sub" text={room.current.artist || t('common.unknownArtist')} />
+                    <Marquee class="title" text={h.title} />
+                    <Marquee
+                      class="sub"
+                      text={`${h.artist || t('common.unknownArtist')}${h.status !== 'done' ? ' · ' + t(`admin.status.${h.status}`) : ''}`}
+                    />
                   </div>
-                  <span class="who">{room.current.nickname}</span>
-                  {@render star({ id: room.current.songId, title: room.current.title, artist: room.current.artist })}
+                  <span class="who">{h.nickname}</span>
+                  {@render star({ id: h.songId, title: h.title, artist: h.artist })}
+                  <button class="ghost small icon" onclick={() => historyMenu(h)} aria-label={t('room.songMenu')}>⋯</button>
                 </li>
-              </ul>
-            {/if}
-          </div>
-
-          {#if room.queue.length === 0}
-            <p class="muted empty">{t('room.queueEmpty')}</p>
-          {:else}
-            <ol class="list upcoming">
-              {#each room.queue as item, i (item.id)}
-                <li class:mine={item.userId === userId}>
-                  <span class="idx">{i + 1}</span>
+              {:else if row.kind === 'current'}
+                {@const item = row.item}
+                <li class="playing" class:mine={item.userId === userId}>
+                  <span class="idx">{room.player.paused ? '⏸' : '♪'}</span>
                   <div class="song">
                     <Marquee class="title" text={item.title} />
                     <Marquee class="sub" text={item.artist || t('common.unknownArtist')} />
                   </div>
                   <span class="who">{item.nickname}</span>
                   {@render star({ id: item.songId, title: item.title, artist: item.artist })}
-                  <button class="ghost small icon" onclick={() => queueMenu(item, i)} aria-label={t('room.songMenu')}>⋯</button>
+                  <span class="icon-space"></span>
                 </li>
-              {/each}
-            </ol>
+              {:else}
+                {@const item = row.item}
+                <li class="upcoming" class:mine={item.userId === userId}>
+                  <span class="idx">{row.index + 1}</span>
+                  <div class="song">
+                    <Marquee class="title" text={item.title} />
+                    <Marquee class="sub" text={item.artist || t('common.unknownArtist')} />
+                  </div>
+                  <span class="who">{item.nickname}</span>
+                  {@render star({ id: item.songId, title: item.title, artist: item.artist })}
+                  <button class="ghost small icon" onclick={() => queueMenu(item, row.index)} aria-label={t('room.songMenu')}>⋯</button>
+                </li>
+              {/if}
+            {/each}
+          </ol>
+          {#if room.queue.length === 0}
+            <p class="muted empty queue-empty" style:top={`${rows.length * ROW_H}px`}>{t('room.queueEmpty')}</p>
           {/if}
         </div>
       {/if}
@@ -599,16 +687,22 @@
     color: var(--danger);
     margin: 0;
   }
+  /* Neutral card: no highlight, just the song on one line plus the controls. */
   .now {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: 6px;
-    background: var(--accent-soft);
-    border-radius: var(--radius);
-    padding: 8px 10px;
-  }
-  .now.idle {
     background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px 8px;
+  }
+  .now-text {
+    flex: 1;
+    min-width: 0;
+  }
+  .turn {
+    flex: none;
   }
   .now-line {
     gap: 8px;
@@ -700,11 +794,34 @@
   li.mine :global(.title) {
     color: var(--accent);
   }
+  /* Virtual list: fixed-height rows positioned inside a full-height box. */
+  .vlist {
+    position: relative;
+  }
+  .rows {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+  }
+  .rows > li {
+    height: 60px;
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  .icon-space {
+    width: 34px;
+  }
+  .queue-empty {
+    position: absolute;
+    left: 0;
+    right: 0;
+  }
   /* History: dimmed and grey, so it reads as "already sung". */
-  .history li {
+  li.history {
     opacity: 0.5;
   }
-  .history li :global(.title) {
+  li.history :global(.title) {
     font-weight: 400;
     color: var(--muted);
   }
@@ -718,9 +835,6 @@
   }
   li.playing .idx {
     color: var(--accent);
-  }
-  .after-now {
-    min-height: 100%;
   }
   .empty {
     text-align: center;

@@ -1,6 +1,6 @@
 // Keys are shared by every locale; add a new file next to this one and register it in i18n.ts.
 export default {
-  'app.name': 'Karaver',
+  'app.name': 'zKaraver',
 
   'common.cancel': '取消',
   'common.save': '儲存',
@@ -13,7 +13,7 @@ export default {
   'common.offline': '連線中斷，正在重新連線…',
   'common.unknownArtist': '未知歌手',
 
-  'home.title': '歡迎來到 Karaver',
+  'home.title': '歡迎來到 zKaraver',
   'home.enterCode': '輸入房間名稱',
   'home.go': '進入',
   'home.scanHint': '或直接掃描播放畫面上的 QR code',
@@ -70,7 +70,7 @@ export default {
   'room.replayAll': '全部重唱',
   'room.replayAllHint': '把所有演唱紀錄重新放回佇列，點歌者維持原本的人',
   'room.replayAllUnavailable': '佇列裡還有歌，或還沒有演唱紀錄時無法使用',
-  'room.replayAllConfirm': '所有演唱紀錄（{n} 筆）都會重新變成佇列，點歌者維持原本的人；重複的歌只會加一次。確定嗎？',
+  'room.replayAllConfirm': '所有演唱紀錄都會重新變成佇列，點歌者維持原本的人；重複的歌只會加一次。確定嗎？',
   'room.replayAllConfirm2': '再確認一次：要把全部演唱紀錄放回佇列嗎？',
   'room.replayAllDone': '已重新加入 {n} 首歌',
   'room.modeFifo': '依點歌順序',
@@ -85,6 +85,11 @@ export default {
   'room.volumeUp': '音量調大',
   'room.volumeDown': '音量調小',
   'room.volumeNow': '目前音量 {n}%',
+  'room.turnIn': '再 {n} 首輪到你',
+  'room.turnNext': '下一首輪到你',
+  'room.themeDark': '深色主題',
+  'room.themeLight': '淺色主題',
+  'room.themeHint': '只套用在這台裝置',
   'room.moreControls': '更多播放控制',
   'room.qrShow': '電視顯示 QR code',
   'room.qrHide': '電視隱藏 QR code',

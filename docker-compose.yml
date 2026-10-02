@@ -1,6 +1,6 @@
 services:
-  karaver:
-    image: ghcr.io/zoosewu/karaver:${KARAVER_TAG:-latest}
+  zkaraver:
+    image: ghcr.io/zoosewu/zkaraver:${ZKARAVER_TAG:-latest}
     restart: unless-stopped
     ports:
       - "${PORT:-8080}:8080"

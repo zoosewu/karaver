@@ -1,0 +1,14 @@
+{
+  "name": "zKaraver",
+  "short_name": "zKaraver",
+  "description": "自架的多房間卡拉 OK 點歌系統",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#14111c",
+  "theme_color": "#14111c",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }
+  ]
+}

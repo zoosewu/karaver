@@ -15,7 +15,7 @@ import (
 	"time"
 	"unicode"
 
-	"karaver/internal/config"
+	"zkaraver/internal/config"
 )
 
 type Song struct {

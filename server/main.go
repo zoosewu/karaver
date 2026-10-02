@@ -13,12 +13,12 @@ import (
 	"syscall"
 	"time"
 
-	"karaver/internal/api"
-	"karaver/internal/config"
-	"karaver/internal/db"
-	"karaver/internal/library"
-	"karaver/internal/room"
-	"karaver/web"
+	"zkaraver/internal/api"
+	"zkaraver/internal/config"
+	"zkaraver/internal/db"
+	"zkaraver/internal/library"
+	"zkaraver/internal/room"
+	"zkaraver/web"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
@@ -31,13 +31,17 @@ func main() {
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
-	log.Printf("karaver %s", version)
+	log.Printf("zkaraver %s", version)
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
 
-	database, err := db.Open(filepath.Join(cfg.DataDir, "karaver.db"))
+	dbPath := filepath.Join(cfg.DataDir, "zkaraver.db")
+	if err := migrateLegacyDB(cfg.DataDir, dbPath); err != nil {
+		log.Fatalf("database: %v", err)
+	}
+	database, err := db.Open(dbPath)
 	if err != nil {
 		log.Fatalf("database: %v (is %s writable by this container's user?)", err, cfg.DataDir)
 	}
@@ -106,4 +110,23 @@ func healthcheck() int {
 		return 1
 	}
 	return 0
+}
+
+// migrateLegacyDB renames the database from before the zKaraver rename
+// (karaver.db, plus its WAL files) when no new database exists yet.
+func migrateLegacyDB(dir, newPath string) error {
+	if _, err := os.Stat(newPath); err == nil {
+		return nil
+	}
+	old := filepath.Join(dir, "karaver.db")
+	if _, err := os.Stat(old); err != nil {
+		return nil
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Rename(old+suffix, newPath+suffix); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("migrate %s: %w", old+suffix, err)
+		}
+	}
+	log.Printf("migrated %s to %s", old, newPath)
+	return nil
 }

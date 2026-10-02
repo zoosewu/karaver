@@ -10,7 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"karaver/internal/room"
+	"zkaraver/internal/room"
 )
 
 func (s *Server) handleMemberWS(w http.ResponseWriter, r *http.Request) {
