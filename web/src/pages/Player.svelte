@@ -77,6 +77,13 @@
     }
   })
 
+  // TV remotes send key events (arrows / OK), not clicks, so any key also unlocks.
+  $effect(() => {
+    if (phase !== 'playing') return
+    addEventListener('keydown', unlock)
+    return () => removeEventListener('keydown', unlock)
+  })
+
   function unlock() {
     if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {})
     if (blocked) tryPlay()

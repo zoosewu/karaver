@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"karaver/internal/config"
 )
@@ -43,6 +44,8 @@ type Library struct {
 	last     *Result
 }
 
+// New returns a library backed by the songs table. Songs are not cached in
+// memory; every lookup is a small indexed query.
 func New(d *sql.DB, cfg *config.Config) *Library {
 	return &Library{db: d, cfg: cfg}
 }
@@ -84,10 +87,10 @@ type fileInfo struct {
 }
 
 type existing struct {
-	id                  int64
-	title, artist, orig string
-	size, mtime         int64
-	present             bool
+	id                          int64
+	title, artist, orig, search string
+	size, mtime                 int64
+	present                     bool
 }
 
 func (l *Library) scan() Result {
@@ -119,7 +122,7 @@ func (l *Library) scan() Result {
 	}
 
 	known := map[string]existing{}
-	rows, err := l.db.Query(`SELECT id, path, title, artist, original_path, size, mtime, present FROM songs`)
+	rows, err := l.db.Query(`SELECT id, path, title, artist, original_path, search, size, mtime, present FROM songs`)
 	if err != nil {
 		res.Error = err.Error()
 		return finish()
@@ -127,7 +130,7 @@ func (l *Library) scan() Result {
 	for rows.Next() {
 		var e existing
 		var p string
-		if err := rows.Scan(&e.id, &p, &e.title, &e.artist, &e.orig, &e.size, &e.mtime, &e.present); err != nil {
+		if err := rows.Scan(&e.id, &p, &e.title, &e.artist, &e.orig, &e.search, &e.size, &e.mtime, &e.present); err != nil {
 			rows.Close()
 			res.Error = err.Error()
 			return finish()
@@ -147,9 +150,9 @@ func (l *Library) scan() Result {
 		stem := strings.TrimSuffix(rel, path.Ext(rel))
 		artist, title := l.parse(path.Base(stem))
 		orig := originals[stem]
-		search := strings.ToLower(artist + " " + title)
+		search := normalize(artist + " " + title)
 		if e, ok := known[rel]; ok {
-			if e.present && e.size == f.size && e.mtime == f.mtime && e.title == title && e.artist == artist && e.orig == orig {
+			if e.present && e.size == f.size && e.mtime == f.mtime && e.title == title && e.artist == artist && e.orig == orig && e.search == search {
 				continue
 			}
 			if _, err := tx.Exec(`UPDATE songs SET title=?, artist=?, search=?, size=?, mtime=?, original_path=?, present=1 WHERE id=?`,
@@ -249,17 +252,42 @@ func (l *Library) parse(stem string) (artist, title string) {
 	return a, b
 }
 
-// Search does a case-insensitive substring match; every whitespace-separated term must match.
+// normalize folds text for forgiving matching: full-width ASCII becomes
+// half-width, letters are lowercased, and everything that is not a letter or
+// digit (spaces, dashes, punctuation, symbols) is dropped. So "五月天 - 倔強",
+// "五月天倔強" and "ＢＥＹＯＮＤ" vs "beyond" compare equal. Scans store the
+// normalized "artist title" in songs.search.
+func normalize(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r >= 0xFF01 && r <= 0xFF5E { // full-width ASCII block
+			r -= 0xFEE0
+		}
+		r = unicode.ToLower(r)
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// Search matches songs whose normalized "artist title" contains every
+// whitespace-separated term of q (each term normalized the same way). Terms
+// that normalize to nothing (pure punctuation) are ignored. Normalized text has
+// no LIKE wildcards, but instr() avoids escaping altogether.
 func (l *Library) Search(q string, limit, offset int) (songs []Song, more bool, err error) {
 	where := []string{"present = 1"}
 	args := []any{}
-	for _, term := range strings.Fields(strings.ToLower(q)) {
-		where = append(where, `search LIKE ? ESCAPE '\'`)
-		args = append(args, "%"+escapeLike(term)+"%")
+	for _, f := range strings.Fields(q) {
+		if t := normalize(f); t != "" {
+			where = append(where, "instr(search, ?) > 0")
+			args = append(args, t)
+		}
 	}
 	args = append(args, limit+1, offset)
 	rows, err := l.db.Query(`SELECT id, title, artist FROM songs WHERE `+strings.Join(where, " AND ")+
-		` ORDER BY artist, title LIMIT ? OFFSET ?`, args...)
+		` ORDER BY artist, title, id LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -290,6 +318,16 @@ func (l *Library) Get(id int64) (Song, error) {
 	return s, err
 }
 
+// Lookup reports a present song's display fields for queueing.
+func (l *Library) Lookup(id int64) (title, artist string, hasOriginal, ok bool) {
+	err := l.db.QueryRow(`SELECT title, artist, original_path != '' FROM songs WHERE id=? AND present=1`, id).
+		Scan(&title, &artist, &hasOriginal)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("song lookup: %v", err)
+	}
+	return title, artist, hasOriginal, err == nil
+}
+
 // OriginalPath returns the original-vocal companion file of a present song.
 func (l *Library) OriginalPath(id int64) (string, error) {
 	var p string
@@ -298,6 +336,11 @@ func (l *Library) OriginalPath(id int64) (string, error) {
 		return "", ErrNotFound
 	}
 	return p, err
+}
+
+func (l *Library) Count() (n int, err error) {
+	err = l.db.QueryRow(`SELECT COUNT(*) FROM songs WHERE present=1`).Scan(&n)
+	return
 }
 
 // Favorites lists a user's favorite songs that are still in the library, newest first.
@@ -331,13 +374,4 @@ func (l *Library) AddFavorite(username string, songID int64) error {
 func (l *Library) RemoveFavorite(username string, songID int64) error {
 	_, err := l.db.Exec(`DELETE FROM favorites WHERE username=? AND song_id=?`, username, songID)
 	return err
-}
-
-func (l *Library) Count() (n int, err error) {
-	err = l.db.QueryRow(`SELECT COUNT(*) FROM songs WHERE present=1`).Scan(&n)
-	return
-}
-
-func escapeLike(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

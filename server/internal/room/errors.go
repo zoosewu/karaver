@@ -18,11 +18,14 @@ var (
 	ErrInvalid          = &Error{400, "invalid"}
 	ErrNicknameInvalid  = &Error{400, "nickname_invalid"}
 	ErrNameInvalid      = &Error{400, "name_invalid"}
+	ErrRoomExists       = &Error{409, "room_exists"}
 	ErrNicknameTaken    = &Error{409, "nickname_taken"}
 	ErrDuplicateSong    = &Error{409, "duplicate_song"}
 	ErrQueueLimit       = &Error{409, "queue_limit"}
 	ErrNotCurrent       = &Error{409, "not_current"}
 	ErrReorderNeedsFIFO = &Error{409, "reorder_requires_fifo"}
 	ErrNoOriginal       = &Error{409, "no_original"}
+	ErrPlayerExists     = &Error{409, "player_exists"}
+	ErrPairCode         = &Error{404, "pair_code_invalid"}
 	ErrInternal         = &Error{500, "internal"}
 )

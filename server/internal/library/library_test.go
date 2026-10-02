@@ -2,6 +2,7 @@ package library
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -143,29 +144,75 @@ func TestScan(t *testing.T) {
 
 func TestSearch(t *testing.T) {
 	l, media := newLib(t, config.Config{})
-	for _, f := range []string{"五月天 - 倔強.mp4", "五月天 - 知足.mp4", "Queen - 100% Pure.mp4", "A_B - x.mp4"} {
+	for _, f := range []string{
+		"五月天 - 倔強.mp4",
+		"五月天 - 知足.mp4",
+		"Queen - 100% Pure.mp4",
+		"A_B - x.mp4",
+		"Beyond - 海闊天空 (Live).mp4",
+		"ＳＨＥ - Ｓｕｐｅｒ Ｓｔａｒ.mp4", // full-width in the filename
+	} {
 		touch(t, media, f)
 	}
 	scan(t, l)
 
-	if got := titles(t, l, "五月天 倔"); len(got) != 1 || got[0] != "五月天|倔強" {
-		t.Fatalf("multi-term = %v", got)
+	cases := []struct {
+		q    string
+		want []string
+	}{
+		{"五月天 倔", []string{"五月天|倔強"}},             // every term must match
+		{"倔強 五月天", []string{"五月天|倔強"}},            // in any order
+		{"五月天倔強", []string{"五月天|倔強"}},             // spaces and the " - " separator are ignored
+		{"五月天-倔強", []string{"五月天|倔強"}},            // punctuation in the query too
+		{"QUEEN", []string{"Queen|100% Pure"}},    // case-insensitive
+		{"100pure", []string{"Queen|100% Pure"}},  // symbols ignored
+		{"ｑｕｅｅｎ", []string{"Queen|100% Pure"}},    // full-width query
+		{"she super", []string{"ＳＨＥ|Ｓｕｐｅｒ Ｓｔａｒ"}}, // full-width title
+		{"海闊天空live", []string{"Beyond|海闊天空 (Live)"}},
+		{"ab", []string{"A_B|x"}},
+		{"不存在", nil},
 	}
-	if got := titles(t, l, "QUEEN"); len(got) != 1 {
-		t.Fatalf("case-insensitive = %v", got)
+	for _, c := range cases {
+		got := titles(t, l, c.q)
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("Search(%q) = %v, want %v", c.q, got, c.want)
+		}
 	}
-	// LIKE wildcards in the query are literal.
-	if got := titles(t, l, "%"); len(got) != 1 || got[0] != "Queen|100% Pure" {
-		t.Fatalf("percent = %v", got)
-	}
-	if got := titles(t, l, "_"); len(got) != 1 || got[0] != "A_B|x" {
-		t.Fatalf("underscore = %v", got)
+	// A query that is only punctuation matches everything.
+	if got := titles(t, l, " - "); len(got) != 6 {
+		t.Errorf("punctuation-only query = %v", got)
 	}
 
-	page, more, _ := l.Search("", 3, 0)
-	rest, more2, _ := l.Search("", 3, 3)
-	if len(page) != 3 || !more || len(rest) != 1 || more2 {
+	page, more, _ := l.Search("", 4, 0)
+	rest, more2, _ := l.Search("", 4, 4)
+	if len(page) != 4 || !more || len(rest) != 2 || more2 {
 		t.Fatalf("paging: %d %v %d %v", len(page), more, len(rest), more2)
+	}
+}
+
+func TestLookupFollowsScans(t *testing.T) {
+	l, media := newLib(t, config.Config{})
+	touch(t, media, "A - one.mp4")
+	scan(t, l)
+	songs, _, _ := l.Search("one", 10, 0)
+	id := songs[0].ID
+	if title, _, _, ok := l.Lookup(id); !ok || title != "one" {
+		t.Fatalf("lookup = %q %v", title, ok)
+	}
+
+	// A second Library on the same database sees the same songs.
+	l2 := New(l.db, l.cfg)
+	if n, _ := l2.Count(); n != 1 {
+		t.Fatalf("fresh library count = %d", n)
+	}
+
+	os.Remove(filepath.Join(media, "A - one.mp4"))
+	scan(t, l)
+	if _, err := l.Get(id); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("removed song still served: %v", err)
+	}
+	if _, _, _, ok := l.Lookup(id); ok {
+		t.Fatal("removed song still queueable")
 	}
 }
 
@@ -270,5 +317,24 @@ func TestDefaultExtensions(t *testing.T) {
 	}
 	if res := scan(t, l); res.Total != 3 {
 		t.Fatalf("total = %d, want 3 (mp4, m4v, webm)", res.Total)
+	}
+}
+
+// Databases written before the normalized search column get fixed by the next scan.
+func TestScanRefreshesSearchKey(t *testing.T) {
+	l, media := newLib(t, config.Config{})
+	touch(t, media, "五月天 - 倔強.mp4")
+	scan(t, l)
+	if _, err := l.db.Exec(`UPDATE songs SET search = '五月天 倔強'`); err != nil { // old format
+		t.Fatal(err)
+	}
+	if got := titles(t, l, "五月天倔強"); len(got) != 0 {
+		t.Fatalf("old key unexpectedly matched: %v", got)
+	}
+	if res := scan(t, l); res.Updated != 1 {
+		t.Fatalf("rescan = %+v, want 1 updated", res)
+	}
+	if got := titles(t, l, "五月天倔強"); len(got) != 1 {
+		t.Fatalf("after rescan = %v", got)
 	}
 }

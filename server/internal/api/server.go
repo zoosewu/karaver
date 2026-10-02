@@ -28,6 +28,7 @@ type Server struct {
 	secret []byte
 	users  sync.Map // token hash -> user id
 	qr     sync.Map // room id -> PNG bytes
+	tv     *tvPairing
 }
 
 func New(cfg *config.Config, d *sql.DB, lib *library.Library, rooms *room.Manager, static fs.FS) (*Server, error) {
@@ -35,7 +36,7 @@ func New(cfg *config.Config, d *sql.DB, lib *library.Library, rooms *room.Manage
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, db: d, lib: lib, rooms: rooms, static: static, secret: secret}, nil
+	return &Server{cfg: cfg, db: d, lib: lib, rooms: rooms, static: static, secret: secret, tv: newTVPairing()}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -60,6 +61,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/rooms/{id}/favorites/{song}", s.handleAddFavorite)
 	mux.HandleFunc("DELETE /api/rooms/{id}/favorites/{song}", s.handleRemoveFavorite)
 
+	mux.HandleFunc("GET /api/tv/ws", s.handleTVWS)
+	mux.HandleFunc("POST /api/rooms/{id}/tv/pair", s.handleMemberPair)
+	mux.HandleFunc("POST /api/admin/rooms/{id}/tv/pair", s.admin(s.handleAdminPair))
 	mux.HandleFunc("GET /api/rooms/{id}/player/ws", s.handlePlayerWS)
 	mux.HandleFunc("POST /api/rooms/{id}/player/ended", s.handlePlayerEnded)
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
+  import PairTV from '../components/PairTV.svelte'
   import { api, ensureSession, errorCode, searchSongs, userToken } from '../lib/api'
   import { errorText, t } from '../lib/i18n'
   import { router } from '../lib/router.svelte'
@@ -267,6 +268,10 @@
         <div class="muted">{t('room.nothingPlaying')}</div>
       {/if}
     </section>
+
+    {#if !room.player.online}
+      <section class="card"><PairTV endpoint={`/api/rooms/${roomId}/tv/pair`} /></section>
+    {/if}
 
     <nav class="tabs">
       <button class:active={tab === 'search'} onclick={() => (tab = 'search')}>{t('room.tabSearch')}</button>

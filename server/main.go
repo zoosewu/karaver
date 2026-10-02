@@ -46,7 +46,7 @@ func main() {
 	lib := library.New(database, cfg)
 	lib.StartScan()
 
-	rooms, err := room.NewManager(database)
+	rooms, err := room.NewManager(database, lib)
 	if err != nil {
 		log.Fatalf("load rooms: %v", err)
 	}
@@ -77,6 +77,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	httpServer.Shutdown(shutdownCtx)
+	rooms.Flush()
 }
 
 // healthcheck probes /healthz on the local listener; exit code 0 means healthy.

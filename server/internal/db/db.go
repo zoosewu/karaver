@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS rooms (
 	volume             INTEGER NOT NULL DEFAULT 100,
 	created_at         INTEGER NOT NULL
 );
+-- Room ids are their names and match case-insensitively.
+CREATE UNIQUE INDEX IF NOT EXISTS rooms_id_nocase ON rooms(id COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS room_members (
 	room_id   TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import PairTV from './PairTV.svelte'
   import { api, errorCode } from '../lib/api'
   import { errorText, t } from '../lib/i18n'
   import { toast } from '../lib/toast.svelte'
@@ -204,10 +205,6 @@
       <h3>{t('admin.settings')}</h3>
       <form class="settings" onsubmit={save}>
         <label class="field">
-          {t('admin.roomName')}
-          <input bind:value={form.name} maxlength="40" />
-        </label>
-        <label class="field">
           {t('admin.mode')}
           <select bind:value={form.mode}>
             <option value="fifo">{t('room.modeFifo')}</option>
@@ -227,6 +224,10 @@
           <button type="button" disabled={!dirty} onclick={() => (form = { ...room!.settings })}>{t('common.cancel')}</button>
         </div>
       </form>
+    </section>
+
+    <section class="card">
+      <PairTV endpoint={`${base}/tv/pair`} admin />
     </section>
 
     <section class="card">

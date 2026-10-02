@@ -121,7 +121,15 @@
       <section class="card">
         <h3>{t('admin.rooms')}</h3>
         <form class="row create" onsubmit={createRoom}>
-          <input bind:value={newName} maxlength="40" placeholder={t('admin.newRoomPlaceholder')} />
+          <input
+            bind:value={newName}
+            maxlength="32"
+            pattern="[A-Za-z0-9_\-]+"
+            title={t('admin.newRoomRule')}
+            autocapitalize="off"
+            autocomplete="off"
+            placeholder={t('admin.newRoomPlaceholder')}
+          />
           <button class="primary" type="submit" disabled={!newName.trim()}>{t('admin.create')}</button>
         </form>
         {#if rooms.length === 0}

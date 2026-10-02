@@ -2,16 +2,21 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"karaver/internal/config"
 	"karaver/internal/db"
@@ -60,7 +65,7 @@ func setup(t *testing.T) *env {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	rooms, err := room.NewManager(d)
+	rooms, err := room.NewManager(d, lib)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,9 +143,12 @@ func (e *env) songID(q string) int64 {
 	return songs[0].ID
 }
 
+var roomSeq int
+
 func (e *env) newRoom(adm *client) string {
+	roomSeq++
 	var r struct{ ID string }
-	adm.do("POST", "/api/admin/rooms", map[string]string{"name": "test"}, 201, &r)
+	adm.do("POST", "/api/admin/rooms", map[string]string{"name": fmt.Sprintf("room-%d", roomSeq)}, 201, &r)
 	return r.ID
 }
 
@@ -305,4 +313,96 @@ func TestMediaAndHealth(t *testing.T) {
 func itoa(n int64) string {
 	b, _ := json.Marshal(n)
 	return string(b)
+}
+
+// tvScreen opens /api/tv/ws like the /tv page and returns its pairing code and
+// a function that waits for the room it gets sent to.
+func (e *env) tvScreen() (string, func() string) {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	e.t.Cleanup(cancel)
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(e.srv.URL, "http")+"/api/tv/ws",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Origin": {e.srv.URL}}})
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(func() { conn.CloseNow() })
+	read := func() map[string]string {
+		_, b, err := conn.Read(ctx)
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		var m map[string]string
+		json.Unmarshal(b, &m)
+		return m
+	}
+	first := read()
+	if first["type"] != "code" || len(first["code"]) != 4 {
+		e.t.Fatalf("first message = %v", first)
+	}
+	return first["code"], func() string {
+		m := read()
+		if m["type"] != "paired" {
+			e.t.Fatalf("paired message = %v", m)
+		}
+		return m["room"]
+	}
+}
+
+func TestTVPairing(t *testing.T) {
+	e := setup(t)
+	adm := e.admin()
+	id := e.newRoom(adm)
+	base := "/api/rooms/" + id
+	guest := e.user()
+	guest.do("POST", base+"/join", map[string]string{"nickname": "guest"}, 204, nil)
+
+	// No player yet: any member can pair a TV.
+	code, waitRoom := e.tvScreen()
+	e.user().do("POST", base+"/tv/pair", map[string]string{"code": code}, 403, nil) // not a member
+	guest.do("POST", base+"/tv/pair", map[string]string{"code": "0000x"}, 404, nil)
+	guest.do("POST", base+"/tv/pair", map[string]string{"code": " " + code + " "}, 204, nil)
+	if got := waitRoom(); got != id {
+		t.Fatalf("TV sent to %q, want %q", got, id)
+	}
+	guest.do("POST", base+"/tv/pair", map[string]string{"code": code}, 404, nil) // codes are single use
+
+	// The paired TV connects as a player; now only admins may pair more TVs.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	player, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(e.srv.URL, "http")+base+"/player/ws",
+		&websocket.DialOptions{HTTPHeader: http.Header{"Origin": {e.srv.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer player.CloseNow()
+	player.Read(ctx) // first state snapshot: the player is registered
+
+	code2, waitRoom2 := e.tvScreen()
+	guest.do("POST", base+"/tv/pair", map[string]string{"code": code2}, 409, nil)
+	e.anon().do("POST", "/api/admin/rooms/"+id+"/tv/pair", map[string]string{"code": code2}, 401, nil)
+	adm.do("POST", "/api/admin/rooms/"+id+"/tv/pair", map[string]string{"code": code2}, 204, nil)
+	if got := waitRoom2(); got != id {
+		t.Fatalf("admin-paired TV sent to %q", got)
+	}
+}
+
+func TestRoomNamesOverHTTP(t *testing.T) {
+	e := setup(t)
+	adm := e.admin()
+	adm.do("POST", "/api/admin/rooms", map[string]string{"name": "客廳"}, 400, nil)
+	adm.do("POST", "/api/admin/rooms", map[string]string{"name": "has space"}, 400, nil)
+	var r struct{ ID string }
+	adm.do("POST", "/api/admin/rooms", map[string]string{"name": "Party_Room-1"}, 201, &r)
+	if r.ID != "Party_Room-1" {
+		t.Fatalf("id = %q", r.ID)
+	}
+	adm.do("POST", "/api/admin/rooms", map[string]string{"name": "party_room-1"}, 409, nil)
+
+	// Any casing in the URL reaches the room; the canonical name is reported back.
+	var info struct{ ID, URL string }
+	e.anon().do("GET", "/api/rooms/PARTY_ROOM-1", nil, 200, &info)
+	if info.ID != "Party_Room-1" || info.URL != "http://ktv.test/r/Party_Room-1" {
+		t.Fatalf("info = %+v", info)
+	}
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"karaver/internal/db"
@@ -29,7 +30,7 @@ func setup(t *testing.T) (*sql.DB, *Manager) {
 			t.Fatal(err)
 		}
 	}
-	m, err := NewManager(d)
+	m, err := NewManager(d, dbSongs{d})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +246,7 @@ func TestKickAndReload(t *testing.T) {
 	}
 
 	// State survives a restart.
-	m2, err := NewManager(d)
+	m2, err := NewManager(d, dbSongs{d})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,5 +398,81 @@ func TestVocalToggle(t *testing.T) {
 	}
 	if err := r.Control("b", false, "vocal", 1); !errors.Is(err, ErrNoOriginal) {
 		t.Fatalf("song without original: %v", err)
+	}
+}
+
+// dbSongs reads songs straight from the test database (the real server uses
+// the library package).
+type dbSongs struct{ d *sql.DB }
+
+func (s dbSongs) Lookup(id int64) (title, artist string, hasOriginal, ok bool) {
+	err := s.d.QueryRow(`SELECT title, artist, original_path != '' FROM songs WHERE id=? AND present=1`, id).
+		Scan(&title, &artist, &hasOriginal)
+	return title, artist, hasOriginal, err == nil
+}
+
+func TestRoomNames(t *testing.T) {
+	d, m := setup(t)
+	for _, bad := range []string{"", "客廳", "living room", "a/b", "x?", "%41", strings.Repeat("a", 33)} {
+		if _, err := m.Create(bad); !errors.Is(err, ErrNameInvalid) {
+			t.Errorf("Create(%q) = %v, want ErrNameInvalid", bad, err)
+		}
+	}
+	r, err := m.Create("Living-Room_2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.ID != "Living-Room_2" || r.settings.Name != "Living-Room_2" {
+		t.Fatalf("id/name = %q/%q", r.ID, r.settings.Name)
+	}
+	if _, err := m.Create("living-room_2"); !errors.Is(err, ErrRoomExists) {
+		t.Fatalf("case-insensitive duplicate: %v", err)
+	}
+	if got, ok := m.Get("LIVING-ROOM_2"); !ok || got != r {
+		t.Fatal("lookup is not case-insensitive")
+	}
+	// The name cannot be changed through settings.
+	if err := r.UpdateSettings(Settings{Name: "other", Mode: ModeRoundRobin}); err != nil {
+		t.Fatal(err)
+	}
+	if r.settings.Name != "Living-Room_2" || r.settings.Mode != ModeRoundRobin {
+		t.Fatalf("settings = %+v", r.settings)
+	}
+	// Survives a restart and can be deleted by any casing.
+	m2, err := NewManager(d, dbSongs{d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := m2.Get("living-room_2"); !ok || got.ID != "Living-Room_2" {
+		t.Fatal("room not reloaded by name")
+	}
+	if err := m2.Delete("LIVING-room_2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m2.Get("Living-Room_2"); ok {
+		t.Fatal("room still present after delete")
+	}
+}
+
+func TestVolumeWrittenOnFlush(t *testing.T) {
+	d, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	mustEnqueue(t, r, "a", 1)
+	if err := r.Control("a", false, "volume", 40); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Control("a", false, "qr", 0); err != nil {
+		t.Fatal(err)
+	}
+	var vol int
+	var qr bool
+	d.QueryRow(`SELECT volume, show_qr FROM rooms WHERE id=?`, r.ID).Scan(&vol, &qr)
+	if vol != 100 || !qr {
+		t.Fatalf("written before flush: volume=%d qr=%v", vol, qr)
+	}
+	m.Flush()
+	d.QueryRow(`SELECT volume, show_qr FROM rooms WHERE id=?`, r.ID).Scan(&vol, &qr)
+	if vol != 40 || qr {
+		t.Fatalf("after flush: volume=%d qr=%v", vol, qr)
 	}
 }

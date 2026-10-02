@@ -54,6 +54,7 @@ type Room struct {
 	paused       bool
 	restartNonce int64
 	vocal        bool // play the original-vocal audio over the karaoke video; reset per song
+	playerDirty  bool // volume/showQR changed since the last flush
 	current      *Item
 	queue        []*Item // unordered; see orderedLocked
 	members      map[string]*Member
@@ -226,6 +227,13 @@ func (r *Room) dropClientLocked(c *Client) {
 		// The next waiting player (if any) becomes active automatically.
 		r.players = slices.DeleteFunc(r.players, func(p *Client) bool { return p == c })
 	}
+}
+
+// HasPlayer reports whether any player (active or waiting) is connected.
+func (r *Room) HasPlayer() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.players) > 0
 }
 
 // activePlayer is the first connected player; the rest wait in line.
@@ -434,9 +442,7 @@ func (r *Room) Control(userID string, admin bool, action string, value int) erro
 		r.paused = false
 	case "volume":
 		r.volume = min(max(value, 0), 100)
-		if err := r.exec(`UPDATE rooms SET volume=? WHERE id=?`, r.volume, r.ID); err != nil {
-			return err
-		}
+		r.playerDirty = true // written on shutdown, see flush
 	case "vocal":
 		if r.current == nil || !r.current.HasOriginal {
 			return ErrNoOriginal
@@ -444,9 +450,7 @@ func (r *Room) Control(userID string, admin bool, action string, value int) erro
 		r.vocal = value != 0
 	case "qr":
 		r.showQR = value != 0
-		if err := r.exec(`UPDATE rooms SET show_qr=? WHERE id=?`, r.showQR, r.ID); err != nil {
-			return err
-		}
+		r.playerDirty = true
 	default:
 		return ErrInvalid
 	}
@@ -457,11 +461,9 @@ func (r *Room) Control(userID string, admin bool, action string, value int) erro
 
 // ---- admin actions ----
 
+// UpdateSettings changes queue rules. The name is the room id and cannot change.
 func (r *Room) UpdateSettings(s Settings) error {
-	s.Name = strings.TrimSpace(s.Name)
-	if n := utf8.RuneCountInString(s.Name); n == 0 || n > 40 {
-		return ErrNameInvalid
-	}
+	s.Name = r.ID
 	if (s.Mode != ModeFIFO && s.Mode != ModeRoundRobin) || s.MaxPerUser < 0 || s.MaxPerUser > 99 ||
 		s.IdleClearMinutes < 0 || s.IdleClearMinutes > 1440 {
 		return ErrInvalid
@@ -474,8 +476,8 @@ func (r *Room) UpdateSettings(s Settings) error {
 			return err
 		}
 	}
-	if err := r.exec(`UPDATE rooms SET name=?, queue_mode=?, max_per_user=?, idle_clear_minutes=? WHERE id=?`,
-		s.Name, s.Mode, s.MaxPerUser, s.IdleClearMinutes, r.ID); err != nil {
+	if err := r.exec(`UPDATE rooms SET queue_mode=?, max_per_user=?, idle_clear_minutes=? WHERE id=?`,
+		s.Mode, s.MaxPerUser, s.IdleClearMinutes, r.ID); err != nil {
 		return err
 	}
 	r.settings = s
@@ -761,4 +763,17 @@ func (r *Room) summary() Summary {
 	}
 	s.Online = len(users)
 	return s
+}
+
+// flush persists volume and the QR overlay setting if they changed. They are
+// kept in memory while running so dragging a volume slider costs no writes.
+func (r *Room) flush() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.playerDirty || r.deleted {
+		return
+	}
+	if r.exec(`UPDATE rooms SET volume=?, show_qr=? WHERE id=?`, r.volume, r.showQR, r.ID) == nil {
+		r.playerDirty = false
+	}
 }

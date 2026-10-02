@@ -2,28 +2,37 @@ package room
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
-	"errors"
 	"log"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 )
+
+// SongSource resolves song ids for queueing (the library).
+type SongSource interface {
+	Lookup(id int64) (title, artist string, hasOriginal, ok bool)
+}
 
 type Manager struct {
 	db    *sql.DB
+	songs SongSource
 	mu    sync.RWMutex
-	rooms map[string]*Room
+	rooms map[string]*Room // keyed by roomKey(id)
 }
 
-// NewManager loads all rooms, members and pending queue items into memory.
-func NewManager(d *sql.DB) (*Manager, error) {
-	m := &Manager{db: d, rooms: map[string]*Room{}}
+// Room ids are their names: 1-32 of [A-Za-z0-9_-], case-insensitive.
+var roomIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
 
-	rows, err := d.Query(`SELECT id, name, queue_mode, max_per_user, idle_clear_minutes, show_qr, volume FROM rooms`)
+func roomKey(id string) string { return strings.ToLower(id) }
+
+// NewManager loads all rooms, members and pending queue items into memory.
+func NewManager(d *sql.DB, songs SongSource) (*Manager, error) {
+	m := &Manager{db: d, songs: songs, rooms: map[string]*Room{}}
+
+	rows, err := d.Query(`SELECT id, queue_mode, max_per_user, idle_clear_minutes, show_qr, volume FROM rooms`)
 	if err != nil {
 		return nil, err
 	}
@@ -32,13 +41,14 @@ func NewManager(d *sql.DB) (*Manager, error) {
 		var s Settings
 		var showQR bool
 		var volume int
-		if err := rows.Scan(&id, &s.Name, &s.Mode, &s.MaxPerUser, &s.IdleClearMinutes, &showQR, &volume); err != nil {
+		if err := rows.Scan(&id, &s.Mode, &s.MaxPerUser, &s.IdleClearMinutes, &showQR, &volume); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		s.Name = id
 		r := newRoom(m, id, s)
 		r.showQR, r.volume = showQR, volume
-		m.rooms[id] = r
+		m.rooms[roomKey(id)] = r
 	}
 	rows.Close()
 
@@ -53,7 +63,7 @@ func NewManager(d *sql.DB) (*Manager, error) {
 			rows.Close()
 			return nil, err
 		}
-		if r := m.rooms[roomID]; r != nil {
+		if r := m.rooms[roomKey(roomID)]; r != nil {
 			r.members[mem.UserID] = &mem
 		}
 	}
@@ -70,7 +80,7 @@ func NewManager(d *sql.DB) (*Manager, error) {
 			rows.Close()
 			return nil, err
 		}
-		if r := m.rooms[roomID]; r != nil {
+		if r := m.rooms[roomKey(roomID)]; r != nil {
 			r.lastSung[userID] = t
 		}
 	}
@@ -89,7 +99,7 @@ func NewManager(d *sql.DB) (*Manager, error) {
 			rows.Close()
 			return nil, err
 		}
-		r := m.rooms[roomID]
+		r := m.rooms[roomKey(roomID)]
 		if r == nil {
 			continue
 		}
@@ -107,7 +117,7 @@ func NewManager(d *sql.DB) (*Manager, error) {
 func (m *Manager) Get(id string) (*Room, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	r, ok := m.rooms[id]
+	r, ok := m.rooms[roomKey(id)]
 	return r, ok
 }
 
@@ -126,40 +136,40 @@ func (m *Manager) List() []Summary {
 	return out
 }
 
+// Create makes a room whose name is also its id and URL. Names cannot change later.
 func (m *Manager) Create(name string) (*Room, error) {
-	name = strings.TrimSpace(name)
-	if n := utf8.RuneCountInString(name); n == 0 || n > 40 {
+	id := strings.TrimSpace(name)
+	if !roomIDPattern.MatchString(id) {
 		return nil, ErrNameInvalid
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	id := newRoomID()
-	for m.rooms[id] != nil {
-		id = newRoomID()
+	if m.rooms[roomKey(id)] != nil {
+		return nil, ErrRoomExists
 	}
-	s := Settings{Name: name, Mode: ModeFIFO}
-	if _, err := m.db.Exec(`INSERT INTO rooms(id, name, queue_mode, created_at) VALUES(?,?,?,?)`, id, name, s.Mode, now()); err != nil {
+	s := Settings{Name: id, Mode: ModeFIFO}
+	if _, err := m.db.Exec(`INSERT INTO rooms(id, name, queue_mode, created_at) VALUES(?,?,?,?)`, id, id, s.Mode, now()); err != nil {
 		log.Printf("create room: %v", err)
 		return nil, ErrInternal
 	}
 	r := newRoom(m, id, s)
-	m.rooms[id] = r
+	m.rooms[roomKey(id)] = r
 	return r, nil
 }
 
 func (m *Manager) Delete(id string) error {
 	m.mu.Lock()
-	r, ok := m.rooms[id]
+	r, ok := m.rooms[roomKey(id)]
 	if !ok {
 		m.mu.Unlock()
 		return ErrNotFound
 	}
-	if _, err := m.db.Exec(`DELETE FROM rooms WHERE id=?`, id); err != nil {
+	if _, err := m.db.Exec(`DELETE FROM rooms WHERE id=?`, r.ID); err != nil {
 		m.mu.Unlock()
 		log.Printf("delete room: %v", err)
 		return ErrInternal
 	}
-	delete(m.rooms, id)
+	delete(m.rooms, roomKey(id))
 	m.mu.Unlock()
 
 	r.mu.Lock()
@@ -225,27 +235,20 @@ func (m *Manager) RunIdleSweeper(ctx context.Context) {
 	}
 }
 
-func (m *Manager) songInfo(id int64) (it Item, err error) {
-	it.SongID = id
-	err = m.db.QueryRow(`SELECT title, artist, original_path != '' FROM songs WHERE id=? AND present=1`, id).
-		Scan(&it.Title, &it.Artist, &it.HasOriginal)
-	if errors.Is(err, sql.ErrNoRows) {
-		return it, ErrSongNotFound
+func (m *Manager) songInfo(id int64) (Item, error) {
+	title, artist, hasOriginal, ok := m.songs.Lookup(id)
+	if !ok {
+		return Item{}, ErrSongNotFound
 	}
-	if err != nil {
-		log.Printf("song lookup: %v", err)
-		return it, ErrInternal
-	}
-	return it, nil
+	return Item{SongID: id, Title: title, Artist: artist, HasOriginal: hasOriginal}, nil
 }
 
-const roomIDAlphabet = "abcdefghjkmnpqrstuvwxyz23456789"
-
-func newRoomID() string {
-	b := make([]byte, 6)
-	rand.Read(b)
-	for i := range b {
-		b[i] = roomIDAlphabet[int(b[i])%len(roomIDAlphabet)]
+// Flush writes player settings that are kept in memory while running (volume,
+// QR overlay) for rooms that changed. Called on shutdown.
+func (m *Manager) Flush() {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, r := range m.rooms {
+		r.flush()
 	}
-	return string(b)
 }
