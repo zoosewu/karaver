@@ -58,3 +58,32 @@ test('home page tells TVs to use /tv', async ({ page }) => {
   await expect(page.locator('main')).toContainText('/tv')
   await expect(page.locator('main img.logo')).toBeVisible()
 })
+
+test('a TV tab that reconnects keeps its place instead of queueing behind itself', async ({ browser }) => {
+  const cookie = await adminCookie()
+  const room = await createRoom(cookie)
+  const instance = `tab-${Date.now()}`
+
+  // The server still holds this tab's old connection (half-open after a network
+  // blip): simulate it with a socket that never closes on its own.
+  const stale = new WebSocket(`${BASE.replace(/^http/, 'ws')}/api/rooms/${room}/player/ws?instance=${instance}`)
+  const staleMessages: string[] = []
+  stale.onmessage = (e) => staleMessages.push(JSON.parse(String(e.data)).type)
+  await expect.poll(() => staleMessages.length).toBeGreaterThan(0)
+
+  // The same tab connects again (sessionStorage keeps its instance id).
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } })
+  await ctx.addInitScript((id) => sessionStorage.setItem('zkaraver.playerInstance', id), instance)
+  const tv = await ctx.newPage()
+  await tv.goto(`/r/${room}/player`)
+  await expect(tv.locator('.idle h1')).toHaveText(room) // the idle screen, not "waiting in line"
+  await expect(tv.locator('.idle-hint')).not.toContainText('排隊')
+  await expect.poll(() => staleMessages.includes('superseded')).toBe(true)
+
+  // A duplicated tab (same id) takes over; the older one stops instead of fighting back.
+  const dup = await ctx.newPage()
+  await dup.goto(`/r/${room}/player`)
+  await expect(dup.locator('.idle h1')).toHaveText(room)
+  await expect(tv.locator('main h2')).toHaveText('這個播放端已在另一個分頁開啟')
+  stale.close()
+})

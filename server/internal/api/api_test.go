@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,14 +24,16 @@ import (
 
 	"zkaraver/internal/config"
 	"zkaraver/internal/db"
+	"zkaraver/internal/keys"
 	"zkaraver/internal/library"
 	"zkaraver/internal/room"
 )
 
 type env struct {
-	t   *testing.T
-	srv *httptest.Server
-	lib *library.Library
+	t     *testing.T
+	srv   *httptest.Server
+	lib   *library.Library
+	media string
 }
 
 func setup(t *testing.T) *env {
@@ -72,13 +75,13 @@ func setup(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(cfg, d, lib, rooms, fstest.MapFS{"index.html": {Data: []byte("<html>spa</html>")}})
+	s, err := New(cfg, d, lib, rooms, keys.New(cfg.DataDir, cfg.MediaDir, lib), fstest.MapFS{"index.html": {Data: []byte("<html>spa</html>")}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
-	return &env{t: t, srv: srv, lib: lib}
+	return &env{t: t, srv: srv, lib: lib, media: media}
 }
 
 // client is either an anonymous user (token) or an admin (cookie jar).
@@ -534,4 +537,61 @@ func TestClearHistoryOverHTTP(t *testing.T) {
 	if len(hist) != 0 {
 		t.Fatalf("history after clear = %+v", hist)
 	}
+}
+
+// A replaced video keeps its URL, so browsers must revalidate rather than
+// replay a cached copy: no-cache plus Last-Modified, 304 when unchanged.
+func TestMediaRevalidates(t *testing.T) {
+	e := setup(t)
+	id := e.songID("two")
+	url := e.srv.URL + "/media/" + itoa(id)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", cc)
+	}
+	lastMod := resp.Header.Get("Last-Modified")
+	if lastMod == "" {
+		t.Fatal("no Last-Modified header")
+	}
+
+	revalidate := func() (int, string) {
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("If-Modified-Since", lastMod)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, _ := revalidate(); code != http.StatusNotModified {
+		t.Fatalf("unchanged file: status %d, want 304", code)
+	}
+
+	// Replace the file in place (same name, so same song id and URL).
+	song, _ := e.lib.Get(id)
+	path := filepath.Join(e.media, filepath.FromSlash(song.Path))
+	if err := os.WriteFile(path, []byte("new video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	later := time.Now().Add(2 * time.Second)
+	os.Chtimes(path, later, later)
+	if code, body := revalidate(); code != http.StatusOK || body != "new video" {
+		t.Fatalf("replaced file: status %d body %q, want 200 with the new content", code, body)
+	}
+}
+
+func TestKeyTrackWithoutFfmpeg(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		t.Skip("ffmpeg installed here; the unavailable path is what this covers")
+	}
+	e := setup(t)
+	// Nothing is rendered: the TV keeps the original key.
+	e.anon().do("GET", "/media/"+itoa(e.songID("one"))+"/key/2", nil, 404, nil)
 }

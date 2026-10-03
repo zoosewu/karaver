@@ -454,26 +454,88 @@ func TestRoomNames(t *testing.T) {
 	}
 }
 
-func TestVolumeWrittenOnFlush(t *testing.T) {
+func TestVolumePerPlayer(t *testing.T) {
 	d, m := setup(t)
 	r := newTestRoom(t, m, ModeFIFO)
+	tab := func(instance string) *Client {
+		c := NewPlayerClient("", "")
+		c.Instance = instance
+		return c
+	}
+	vol := func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.activeVolumeLocked()
+	}
 	mustEnqueue(t, r, "a", 1)
-	if err := r.Control("a", false, "volume", 40); err != nil {
-		t.Fatal(err)
+	mustEnqueue(t, r, "a", 2)
+	if err := r.Control("a", false, "volume", 40); !errors.Is(err, ErrNoPlayer) {
+		t.Fatalf("no player: %v", err)
 	}
-	if err := r.Control("a", false, "qr", 0); err != nil {
-		t.Fatal(err)
+
+	tv := tab("living-room-tv")
+	r.Attach(tv)
+	if err := r.Control("a", false, "volume", 40); err != nil || vol() != 40 {
+		t.Fatalf("set: %v vol=%d", err, vol())
 	}
-	var vol int
-	var qr bool
-	d.QueryRow(`SELECT volume, show_qr FROM rooms WHERE id=?`, r.ID).Scan(&vol, &qr)
-	if vol != 100 || !qr {
-		t.Fatalf("written before flush: volume=%d qr=%v", vol, qr)
+	finishCurrent(t, r) // next song: same player, same volume
+	if vol() != 40 {
+		t.Fatalf("after next song = %d", vol())
 	}
+	r.Attach(tab("living-room-tv")) // the same tab reconnects
+	if vol() != 40 {
+		t.Fatalf("after reconnect = %d", vol())
+	}
+
+	// Another player starts at 100 and has its own level.
+	r.mu.Lock()
+	tvNow := r.players[0]
+	r.mu.Unlock()
+	laptop := tab("laptop")
+	r.Attach(laptop)
+	r.Detach(tvNow)
+	if vol() != 100 {
+		t.Fatalf("other player starts at %d, want 100", vol())
+	}
+	r.Control("", true, "volume", 70)
+
+	// Kept in memory; written per (room, player) only on shutdown; survives a restart.
+	var n int
+	d.QueryRow(`SELECT COUNT(*) FROM player_volumes`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("written before flush: %d rows", n)
+	}
+	r.Control("", true, "qr", 0)
 	m.Flush()
-	d.QueryRow(`SELECT volume, show_qr FROM rooms WHERE id=?`, r.ID).Scan(&vol, &qr)
-	if vol != 40 || qr {
-		t.Fatalf("after flush: volume=%d qr=%v", vol, qr)
+	got := map[string]int{}
+	rows, _ := d.Query(`SELECT instance, volume FROM player_volumes WHERE room_id=?`, r.ID)
+	for rows.Next() {
+		var k string
+		var v int
+		rows.Scan(&k, &v)
+		got[k] = v
+	}
+	rows.Close()
+	if got["living-room-tv"] != 40 || got["laptop"] != 70 || len(got) != 2 {
+		t.Fatalf("saved volumes = %v", got)
+	}
+	var qr bool
+	d.QueryRow(`SELECT show_qr FROM rooms WHERE id=?`, r.ID).Scan(&qr)
+	if qr {
+		t.Fatal("QR setting not flushed")
+	}
+
+	m2, err := NewManager(d, dbSongs{d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := m2.Get(r.ID)
+	r2.Attach(tab("living-room-tv"))
+	r2.mu.Lock()
+	v := r2.activeVolumeLocked()
+	r2.mu.Unlock()
+	if v != 40 {
+		t.Fatalf("after restart = %d, want 40", v)
 	}
 }
 
@@ -695,5 +757,55 @@ func TestKeyShift(t *testing.T) {
 	finishCurrent(t, r)
 	if r.keyShift != 0 {
 		t.Fatalf("key not reset for the next song: %d", r.keyShift)
+	}
+}
+
+// A tab that reconnects while the server still holds its old (half-open)
+// connection must take over its own place, not queue behind itself.
+func TestPlayerReconnectKeepsItsPlace(t *testing.T) {
+	_, m := setup(t)
+	r := newTestRoom(t, m, ModeFIFO)
+	tab := func(instance string) *Client {
+		c := NewPlayerClient("", "")
+		c.Instance = instance
+		return c
+	}
+	tv, other := tab("tv"), tab("laptop")
+	r.Attach(tv)
+	r.Attach(other)
+
+	again := tab("tv") // same tab, new connection; the old one never closed
+	if err := r.Attach(again); err != nil {
+		t.Fatal(err)
+	}
+	if r.activePlayer() != again || len(r.players) != 2 || r.players[1] != other {
+		t.Fatalf("players after reconnect: active=%p want %p, n=%d", r.activePlayer(), again, len(r.players))
+	}
+	if again.PlayerID != tv.PlayerID {
+		t.Fatal("admins should still see the same player")
+	}
+	select {
+	case <-tv.Done:
+	default:
+		t.Fatal("stale connection not closed")
+	}
+	// The stale connection's late disconnect changes nothing.
+	r.Detach(tv)
+	if r.activePlayer() != again || len(r.players) != 2 {
+		t.Fatal("late detach of the stale connection removed the live one")
+	}
+
+	// A waiting tab reconnecting keeps its place in line too.
+	otherAgain := tab("laptop")
+	r.Attach(otherAgain)
+	if len(r.players) != 2 || r.players[0] != again || r.players[1] != otherAgain {
+		t.Fatal("waiting tab lost its place")
+	}
+
+	// Connections without an instance (old pages) still just queue.
+	r.Attach(tab(""))
+	r.Attach(tab(""))
+	if len(r.players) != 4 {
+		t.Fatalf("players = %d, want 4", len(r.players))
 	}
 }

@@ -55,10 +55,13 @@ type Room struct {
 	m  *Manager
 	ID string
 
-	mu           sync.Mutex
-	settings     Settings
-	showQR       bool
-	volume       int
+	mu       sync.Mutex
+	settings Settings
+	showQR   bool
+	// Volume belongs to a player (room × player), not to the room: each TV keeps
+	// its own level across songs and reconnects; another TV starts at 100.
+	volumes      map[string]int  // playerKey -> volume
+	volumesDirty map[string]bool // changed since the last flush
 	paused       bool
 	restartNonce int64
 	vocal        bool  // play the original-vocal audio over the karaoke video; reset per song
@@ -67,7 +70,7 @@ type Room struct {
 	seekNonce    int64 // bumped on every relative seek; seekDelta is how far
 	seekDelta    int
 	keyShift     int  // semitones, -6..6, applied on the TV; reset per song
-	playerDirty  bool // volume/showQR changed since the last flush
+	playerDirty  bool // showQR changed since the last flush
 	current      *Item
 	queue        []*Item // unordered; see orderedLocked
 	members      map[string]*Member
@@ -85,7 +88,8 @@ func newRoom(m *Manager, id string, s Settings) *Room {
 		ID:           id,
 		settings:     s,
 		showQR:       true,
-		volume:       100,
+		volumes:      map[string]int{},
+		volumesDirty: map[string]bool{},
 		ratePct:      100,
 		members:      map[string]*Member{},
 		lastSung:     map[string]int64{},
@@ -231,7 +235,7 @@ func (r *Room) Attach(c *Client) error {
 		}
 	}
 	if c.Kind == KindPlayer {
-		r.players = append(r.players, c)
+		r.addPlayerLocked(c)
 	}
 	r.clients[c] = struct{}{}
 	r.broadcastLocked()
@@ -254,6 +258,25 @@ func (r *Room) dropClientLocked(c *Client) {
 		// The next waiting player (if any) becomes active automatically.
 		r.players = slices.DeleteFunc(r.players, func(p *Client) bool { return p == c })
 	}
+}
+
+// addPlayerLocked puts a player at the end of the line, unless the same browser
+// tab is already connected: then the new connection takes over that place.
+// This is what a reconnect after a network blip looks like, while the server
+// may still believe the old (half-open) connection is alive; without this the
+// tab would queue behind its own dead connection.
+func (r *Room) addPlayerLocked(c *Client) {
+	if c.Instance != "" {
+		if i := slices.IndexFunc(r.players, func(p *Client) bool { return p.Instance == c.Instance }); i >= 0 {
+			old := r.players[i]
+			c.PlayerID = old.PlayerID // same player as far as admins are concerned
+			r.players[i] = c
+			delete(r.clients, old)
+			old.pushAndClose(message("superseded"))
+			return
+		}
+	}
+	r.players = append(r.players, c)
 }
 
 // HasPlayer reports whether any player (active or waiting) is connected.
@@ -468,8 +491,15 @@ func (r *Room) Control(userID string, admin bool, action string, value int) erro
 		r.restartNonce++
 		r.paused = false
 	case "volume":
-		r.volume = min(max(value, 0), 100)
-		r.playerDirty = true // written on shutdown, see flush
+		p := r.activePlayer()
+		if p == nil {
+			return ErrNoPlayer
+		}
+		k := playerKey(p)
+		r.volumes[k] = min(max(value, 0), 100)
+		if p.Instance != "" {
+			r.volumesDirty[k] = true // written on shutdown, see flush
+		}
 	case "rate":
 		r.ratePct = min(max(value, minRatePct), maxRatePct)
 	case "key":
@@ -477,6 +507,7 @@ func (r *Room) Control(userID string, admin bool, action string, value int) erro
 			return ErrInvalid
 		}
 		r.keyShift = min(max(value, -maxKeyShift), maxKeyShift)
+		r.m.keys.Want(r.current.SongID, r.keyShift) // rendered first if not ready yet
 	case "seek":
 		if r.current == nil || value == 0 {
 			return ErrInvalid
@@ -845,6 +876,10 @@ type playerView struct {
 	SeekNonce    int64 `json:"seekNonce"` // changes on every relative seek
 	SeekDelta    int   `json:"seekDelta"` // seconds, negative = back
 	Key          int   `json:"key"`       // semitones up (+) or down (-)
+	// KeyAvailable: the server can change key (ffmpeg installed). KeysReady: the
+	// current song's rendered keys; others play at the original key until ready.
+	KeyAvailable bool  `json:"keyAvailable"`
+	KeysReady    []int `json:"keysReady"`
 }
 
 // playerClientView lists a player connection for admins.
@@ -905,14 +940,18 @@ func (r *Room) viewLocked(admin bool) stateView {
 		Members:    []memberView{},
 		HistoryRev: r.historyRev,
 		Player: playerView{
-			Online: len(r.players) > 0, Paused: r.paused, Volume: r.volume,
+			Online: len(r.players) > 0, Paused: r.paused, Volume: r.activeVolumeLocked(),
 			ShowQR: r.showQR, RestartNonce: r.restartNonce, Vocal: r.vocal,
 			RatePct: r.ratePct, SeekNonce: r.seekNonce, SeekDelta: r.seekDelta, Key: r.keyShift,
+			KeyAvailable: r.m.keys.Available(), KeysReady: []int{},
 		},
 	}
 	if r.current != nil {
 		v := r.viewItem(r.current)
 		s.Current = &v
+		if ready := r.m.keys.Ready(r.current.SongID); ready != nil {
+			s.Player.KeysReady = ready
+		}
 	}
 	for _, it := range r.orderedLocked() {
 		s.Queue = append(s.Queue, r.viewItem(it))
@@ -936,6 +975,7 @@ func (r *Room) viewLocked(admin bool) stateView {
 }
 
 func (r *Room) broadcastLocked() {
+	r.m.keys.Wake() // the queue may have changed: re-plan key renders
 	if len(r.clients) == 0 {
 		return
 	}
@@ -993,15 +1033,42 @@ func (r *Room) summary() Summary {
 	return s
 }
 
-// flush persists volume and the QR overlay setting if they changed. They are
-// kept in memory while running so dragging a volume slider costs no writes.
+// playerKey identifies a player for its settings: the browser tab when known
+// (stable across reconnects and reloads), otherwise this connection only.
+func playerKey(c *Client) string {
+	if c.Instance != "" {
+		return c.Instance
+	}
+	return "conn:" + c.PlayerID
+}
+
+// activeVolumeLocked is the volume of the player that is playing (100 when that
+// player never changed it, or when no player is connected).
+func (r *Room) activeVolumeLocked() int {
+	if p := r.activePlayer(); p != nil {
+		if v, ok := r.volumes[playerKey(p)]; ok {
+			return v
+		}
+	}
+	return 100
+}
+
+// flush persists the QR overlay setting and per-player volumes that changed.
+// They are kept in memory while running so pressing volume buttons costs no writes.
 func (r *Room) flush() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.playerDirty || r.deleted {
+	if r.deleted {
 		return
 	}
-	if r.exec(`UPDATE rooms SET volume=?, show_qr=? WHERE id=?`, r.volume, r.showQR, r.ID) == nil {
+	if r.playerDirty && r.exec(`UPDATE rooms SET show_qr=? WHERE id=?`, r.showQR, r.ID) == nil {
 		r.playerDirty = false
+	}
+	for k := range r.volumesDirty {
+		if r.exec(`INSERT INTO player_volumes(room_id, instance, volume, updated_at) VALUES(?,?,?,?)
+			ON CONFLICT(room_id, instance) DO UPDATE SET volume=excluded.volume, updated_at=excluded.updated_at`,
+			r.ID, k, r.volumes[k], now()) == nil {
+			delete(r.volumesDirty, k)
+		}
 	}
 }

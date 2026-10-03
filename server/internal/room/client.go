@@ -28,9 +28,12 @@ type Client struct {
 	// sent to the player itself and authorizes its "song ended" reports.
 	PlayerID     string
 	PlayerSecret string
-	RemoteAddr   string
-	UserAgent    string
-	ConnectedAt  int64
+	// Instance identifies the browser tab (kept across reconnects and reloads).
+	// A new connection with the same Instance takes over the old one's place.
+	Instance    string
+	RemoteAddr  string
+	UserAgent   string
+	ConnectedAt int64
 }
 
 func NewClient(kind ClientKind, userID string) *Client {

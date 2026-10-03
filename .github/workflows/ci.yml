@@ -102,6 +102,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The default image installs ffmpeg with apt, which runs as the target arch.
+      - uses: docker/setup-qemu-action@v3
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -124,13 +127,39 @@ jobs:
             type=semver,pattern={{major}}
             type=sha
 
+      # Default image: with ffmpeg + Rubber Band (key change).
       - uses: docker/build-push-action@v6
         with:
           context: .
+          target: full
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # "slim": Alpine without key change. main -> slim; v1.2.3 -> 1.2.3-slim, 1.2-slim, 1-slim.
+      - id: meta-slim
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=slim,enable={{is_default_branch}}
+            type=semver,pattern={{version}},suffix=-slim
+            type=semver,pattern={{major}}.{{minor}},suffix=-slim
+            type=semver,pattern={{major}},suffix=-slim
+            type=sha,suffix=-slim
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: slim
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta-slim.outputs.tags }}
+          labels: ${{ steps.meta-slim.outputs.labels }}
           build-args: VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

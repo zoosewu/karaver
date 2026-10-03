@@ -19,9 +19,81 @@ type SongSource interface {
 type Manager struct {
 	db    *sql.DB
 	songs SongSource
+	keys  Keys
 	mu    sync.RWMutex
 	rooms map[string]*Room // keyed by roomKey(id)
 }
+
+// Keys is the key-change renderer (package keys).
+type Keys interface {
+	Available() bool
+	Ready(songID int64) []int
+	Want(songID int64, semis int)
+	Wake()
+}
+
+type noKeys struct{}
+
+func (noKeys) Available() bool   { return false }
+func (noKeys) Ready(int64) []int { return nil }
+func (noKeys) Want(int64, int)   {}
+func (noKeys) Wake()             {}
+
+// SetKeys connects the key renderer (before clients connect).
+func (m *Manager) SetKeys(k Keys) { m.keys = k }
+
+// QueuedSongs lists the songs of every room's current song and queue, nearest
+// first: all current songs, then every room's next song, and so on.
+func (m *Manager) QueuedSongs() []int64 {
+	m.mu.RLock()
+	var lists [][]int64
+	for _, r := range m.rooms {
+		r.mu.Lock()
+		var ids []int64
+		if r.current != nil {
+			ids = append(ids, r.current.SongID)
+		}
+		for _, it := range r.orderedLocked() {
+			ids = append(ids, it.SongID)
+		}
+		r.mu.Unlock()
+		lists = append(lists, ids)
+	}
+	m.mu.RUnlock()
+	seen := map[int64]bool{}
+	var out []int64
+	for depth := 0; ; depth++ {
+		more := false
+		for _, ids := range lists {
+			if depth < len(ids) {
+				more = true
+				if id := ids[depth]; !seen[id] {
+					seen[id] = true
+					out = append(out, id)
+				}
+			}
+		}
+		if !more {
+			return out
+		}
+	}
+}
+
+// KeysReady tells rooms playing a song that another of its keys is rendered.
+func (m *Manager) KeysReady(songID int64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, r := range m.rooms {
+		r.mu.Lock()
+		if r.current != nil && r.current.SongID == songID {
+			r.broadcastLocked()
+		}
+		r.mu.Unlock()
+	}
+}
+
+// How long a player's volume is remembered without being changed or saved again.
+const playerVolumeTTL = 30 * 24 * time.Hour
 
 // Room ids are their names: 1-32 of [A-Za-z0-9_-], case-insensitive.
 var roomIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
@@ -30,9 +102,9 @@ func roomKey(id string) string { return strings.ToLower(id) }
 
 // NewManager loads all rooms, members and pending queue items into memory.
 func NewManager(d *sql.DB, songs SongSource) (*Manager, error) {
-	m := &Manager{db: d, songs: songs, rooms: map[string]*Room{}}
+	m := &Manager{db: d, songs: songs, keys: noKeys{}, rooms: map[string]*Room{}}
 
-	rows, err := d.Query(`SELECT id, queue_mode, max_per_user, idle_clear_minutes, show_qr, volume FROM rooms`)
+	rows, err := d.Query(`SELECT id, queue_mode, max_per_user, idle_clear_minutes, show_qr FROM rooms`)
 	if err != nil {
 		return nil, err
 	}
@@ -40,15 +112,35 @@ func NewManager(d *sql.DB, songs SongSource) (*Manager, error) {
 		var id string
 		var s Settings
 		var showQR bool
-		var volume int
-		if err := rows.Scan(&id, &s.Mode, &s.MaxPerUser, &s.IdleClearMinutes, &showQR, &volume); err != nil {
+		if err := rows.Scan(&id, &s.Mode, &s.MaxPerUser, &s.IdleClearMinutes, &showQR); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		s.Name = id
 		r := newRoom(m, id, s)
-		r.showQR, r.volume = showQR, volume
+		r.showQR = showQR
 		m.rooms[roomKey(id)] = r
+	}
+	rows.Close()
+
+	// Per-player volumes (room × browser tab). Players unseen for 30 days are forgotten.
+	if _, err := d.Exec(`DELETE FROM player_volumes WHERE updated_at < ?`, now()-playerVolumeTTL.Milliseconds()); err != nil {
+		return nil, err
+	}
+	rows, err = d.Query(`SELECT room_id, instance, volume FROM player_volumes`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var roomID, instance string
+		var volume int
+		if err := rows.Scan(&roomID, &instance, &volume); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if r := m.rooms[roomKey(roomID)]; r != nil {
+			r.volumes[instance] = volume
+		}
 	}
 	rows.Close()
 

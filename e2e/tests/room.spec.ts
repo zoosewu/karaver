@@ -50,9 +50,11 @@ test.describe('room page on a phone', () => {
       await expect(page.locator('.panel .message')).toContainText(word)
       await confirmDialog(page, false)
     }
-    // Volume, TV QR and vocals live behind "⋯".
+    // TV QR and key live behind "⋯" (volume appears once a TV is connected).
     await page.locator('.transport .more').click()
-    await expect(page.locator('.panel .action')).toContainText(['音量調大', '音量調小', 'QR'])
+    await expect(page.locator('.panel .action', { hasText: 'QR' })).toBeVisible()
+    await expect(page.locator('.panel .action', { hasText: '升 key' })).toBeVisible()
+    await expect(page.locator('.panel .sub')).toContainText('沒有播放端')
   })
 
   test('shows the room QR code', async ({ browser }) => {
@@ -209,4 +211,87 @@ test('history can be deleted from the room settings once the queue is empty', as
   // Cleared everywhere at once; the song that is playing stays.
   await expect(other.page.locator('li.history')).toHaveCount(0)
   await expect(other.page.locator('li.playing')).toContainText('這是一首')
+})
+
+test('search: sort button and browsing by artist', async ({ browser }) => {
+  const cookie = await adminCookie()
+  const room = await createRoom(cookie)
+  const { page } = await openPhone(browser, room, '小明')
+  const titles = () => page.locator('.scroller li .title').allTextContents()
+  const sortButton = page.locator('.search-row .sort-btn')
+  await expect(sortButton).toContainText('歌手')
+
+  // Sort songs by title.
+  await sortButton.click()
+  await page.locator('.panel .action', { hasText: '依歌名排序' }).click()
+  await expect(sortButton).toContainText('歌名')
+  await expect.poll(async () => (await titles())[0]).toBe('Bohemian Rhapsody (2011 Remaster) [Official Music Video with Lyrics and Extended Ending]')
+
+  // Browse by artist: artists with song counts, then one artist's songs, then back.
+  await sortButton.click()
+  await page.locator('.panel .action', { hasText: '依歌手分類' }).click()
+  const artistRow = page.locator('.artist-row', { hasText: '五月天' })
+  await expect(artistRow).toContainText('1 首')
+  await expect(page.locator('.artist-row', { hasText: 'Filler' })).toContainText('70 首')
+  await artistRow.click()
+  await expect(page.locator('.back-row')).toContainText('五月天')
+  await expect.poll(titles).toEqual(['倔強'])
+  await page.locator('.back-row').click()
+  await expect(page.locator('.artist-row').first()).toBeVisible()
+
+  // Artists by number of songs; the query lists artists with matching songs.
+  await sortButton.click()
+  await page.locator('.panel .action', { hasText: '依歌曲數量' }).click()
+  await expect(page.locator('.artist-row').first()).toContainText('Filler')
+  await page.locator('input[type=search]').fill('晴天')
+  await expect(page.locator('.artist-row')).toHaveCount(1)
+  await expect(page.locator('.artist-row')).toContainText('周杰倫')
+
+  // The choice is remembered on this phone.
+  await page.reload()
+  await expect(page.locator('.search-row .sort-btn')).toContainText('數量')
+})
+
+test('volume: the sheet stays open, and the level belongs to the TV', async ({ browser }) => {
+  const cookie = await adminCookie()
+  const room = await createRoom(cookie)
+  const { page, user } = await openPhone(browser, room, '小明')
+  await enqueue(room, user, await songId('晴天'))
+  await enqueue(room, user, await songId('遇見'))
+
+  const openTV = async (instance: string) => {
+    const ctx = await browser.newContext({ viewport: { width: 1280, height: 720 } })
+    await ctx.addInitScript((id) => sessionStorage.setItem('zkaraver.playerInstance', id), instance)
+    const tv = await ctx.newPage()
+    await tv.goto(`/r/${room}/player`)
+    return tv
+  }
+  const tvVolume = (tv: import('@playwright/test').Page) =>
+    tv.evaluate(() => (document.querySelector('video:not(.nosleep)') as HTMLVideoElement | null)?.volume ?? null)
+
+  const tvA = await openTV('tv-a')
+  await page.locator('.transport .more').click()
+  const sub = page.locator('.panel .sub')
+  await expect(sub).toContainText('目前音量 100%')
+  // Choosing an option keeps the sheet open and the numbers update in place.
+  await page.locator('.panel .action', { hasText: '音量調小' }).click()
+  await page.locator('.panel .action', { hasText: '音量調小' }).click()
+  await expect(sub).toContainText('目前音量 80%')
+  await expect(page.locator('.panel')).toBeVisible()
+  await expect.poll(() => tvVolume(tvA), { timeout: 15_000 }).toBeCloseTo(0.8)
+
+  // Kept for the next song on the same TV.
+  await skipCurrent(room, cookie, user)
+  await expect(sub).toContainText('目前音量 80%')
+  await expect.poll(() => tvVolume(tvA), { timeout: 15_000 }).toBeCloseTo(0.8)
+
+  // Another TV starts at 100; the first TV gets its own level back when it returns.
+  await tvA.context().close()
+  const tvB = await openTV('tv-b')
+  await expect(sub).toContainText('目前音量 100%')
+  await tvB.context().close()
+  await openTV('tv-a')
+  await expect(sub).toContainText('目前音量 80%')
+  await page.locator('.panel .action.cancel').click()
+  await expect(page.locator('.panel')).toHaveCount(0)
 })

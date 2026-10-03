@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"zkaraver/internal/config"
+	"zkaraver/internal/keys"
 	"zkaraver/internal/library"
 	"zkaraver/internal/room"
 )
@@ -30,6 +31,7 @@ type Server struct {
 	users  sync.Map // token hash -> user id
 	qr     sync.Map // room id -> PNG bytes
 	tv     *tvPairing
+	keys   *keys.Renderer
 }
 
 func init() {
@@ -37,12 +39,12 @@ func init() {
 	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
 }
 
-func New(cfg *config.Config, d *sql.DB, lib *library.Library, rooms *room.Manager, static fs.FS) (*Server, error) {
+func New(cfg *config.Config, d *sql.DB, lib *library.Library, rooms *room.Manager, keyR *keys.Renderer, static fs.FS) (*Server, error) {
 	secret, err := loadSecret(d)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, db: d, lib: lib, rooms: rooms, static: static, secret: secret, tv: newTVPairing()}, nil
+	return &Server{cfg: cfg, db: d, lib: lib, rooms: rooms, static: static, secret: secret, tv: newTVPairing(), keys: keyR}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -51,9 +53,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/config", s.handleConfig)
 	mux.HandleFunc("POST /api/session", s.handleSession)
 	mux.HandleFunc("GET /api/songs", s.handleSongs)
+	mux.HandleFunc("GET /api/artists", s.handleArtists)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /media/{id}", s.handleMedia)
 	mux.HandleFunc("GET /media/{id}/original", s.handleOriginal)
+	mux.HandleFunc("GET /media/{id}/key/{semis}", s.handleKeyTrack)
 
 	mux.HandleFunc("GET /api/rooms/{id}", s.handleRoomInfo)
 	mux.HandleFunc("GET /api/rooms/{id}/qr.png", s.handleQR)

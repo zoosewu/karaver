@@ -1,6 +1,6 @@
 import type { RoomState } from './types'
 
-export type Terminal = 'kicked' | 'deleted' | 'rejected'
+export type Terminal = 'kicked' | 'deleted' | 'superseded' | 'rejected'
 
 export interface RoomSocketHandlers {
   onState: (s: RoomState) => void
@@ -33,7 +33,7 @@ export function connectRoom(path: string, h: RoomSocketHandlers): () => void {
       const msg = JSON.parse(ev.data)
       if (msg.type === 'state') {
         h.onState(msg)
-      } else if (msg.type === 'kicked' || msg.type === 'deleted') {
+      } else if (msg.type === 'kicked' || msg.type === 'deleted' || msg.type === 'superseded') {
         stop()
         h.onTerminal?.(msg.type)
       }

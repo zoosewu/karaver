@@ -1,6 +1,12 @@
 # Build the image from source instead of pulling it:
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+# ZKARAVER_TARGET=slim builds the small image without key change (no ffmpeg).
+# DEBIAN_MIRROR=http://ftp.tw.debian.org/debian speeds up the default build where deb.debian.org is slow.
 services:
   zkaraver:
     image: zkaraver:local
-    build: .
+    build:
+      context: .
+      target: ${ZKARAVER_TARGET:-full}
+      args:
+        DEBIAN_MIRROR: ${DEBIAN_MIRROR:-}

@@ -28,6 +28,7 @@ var (
 	ErrQueueNotEmpty    = &Error{409, "queue_not_empty"}
 	ErrNoHistory        = &Error{409, "no_history"}
 	ErrPlayerExists     = &Error{409, "player_exists"}
+	ErrNoPlayer         = &Error{409, "no_player"}
 	ErrPairCode         = &Error{404, "pair_code_invalid"}
 	ErrInternal         = &Error{500, "internal"}
 )

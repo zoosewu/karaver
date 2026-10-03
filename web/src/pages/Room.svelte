@@ -2,13 +2,23 @@
   import { onMount, tick } from 'svelte'
   import Marquee from '../components/Marquee.svelte'
   import PairTV from '../components/PairTV.svelte'
-  import { api, ensureSession, errorCode, searchSongs, userToken } from '../lib/api'
+  import {
+    api,
+    ensureSession,
+    errorCode,
+    listArtists,
+    searchSongs,
+    userToken,
+    type Artist,
+    type ArtistSort,
+    type SongSort,
+  } from '../lib/api'
   import { ask, askTwice, sheet, type SheetAction } from '../lib/dialog.svelte'
-  import { errorText, t } from '../lib/i18n'
+  import { errorText, t, type MessageKey } from '../lib/i18n'
   import { router } from '../lib/router.svelte'
   import { storage } from '../lib/storage'
   import { toast } from '../lib/toast.svelte'
-  import { keyActions, keyLabel } from '../lib/controls'
+  import { keyLabel, openPlayerControls } from '../lib/controls'
   import { setTheme, themeState } from '../lib/theme.svelte'
   import { connectRoom } from '../lib/ws'
   import type { HistoryEntry, QueueItem, RoomState, Song } from '../lib/types'
@@ -79,9 +89,22 @@
     })
   })
 
-  // ---- search ----
+  // ---- search: a song list, or browsing by artist; view and sort are per device ----
+  type SearchView = 'songs' | 'artists'
+  const SONG_SORTS: SongSort[] = ['artist', 'title', 'new', 'popular']
+  const ARTIST_SORTS: ArtistSort[] = ['name', 'count']
+  const pick = <T extends string>(v: string | null, options: T[]): T => (options.includes(v as T) ? (v as T) : options[0])
+
   let query = $state('')
+  let searchView = $state<SearchView>(pick(storage.get('zkaraver.searchView'), ['songs', 'artists']))
+  let songSort = $state<SongSort>(pick(storage.get('zkaraver.songSort'), SONG_SORTS))
+  let artistSort = $state<ArtistSort>(pick(storage.get('zkaraver.artistSort'), ARTIST_SORTS))
+  // Browsing by artist: null = the artist list, otherwise that artist's songs ("" = unknown).
+  let selectedArtist = $state<string | null>(null)
+  const listingArtists = $derived(searchView === 'artists' && selectedArtist === null)
+
   let results = $state<Song[]>([])
+  let artists = $state<Artist[]>([])
   let more = $state(false)
   let searching = $state(false)
   let searchSeq = 0
@@ -90,10 +113,17 @@
     const seq = ++searchSeq
     searching = true
     try {
-      const r = await searchSongs(q, offset)
-      if (seq !== searchSeq) return
-      results = offset ? [...results, ...r.items] : r.items
-      more = r.more
+      if (listingArtists) {
+        const r = await listArtists(q, offset, artistSort)
+        if (seq !== searchSeq) return
+        artists = offset ? [...artists, ...r.items] : r.items
+        more = r.more
+      } else {
+        const r = await searchSongs(q, offset, songSort, searchView === 'artists' ? (selectedArtist ?? undefined) : undefined)
+        if (seq !== searchSeq) return
+        results = offset ? [...results, ...r.items] : r.items
+        more = r.more
+      }
     } catch (e) {
       if (seq === searchSeq) toast(errorText(errorCode(e)), 'error')
     } finally {
@@ -106,18 +136,80 @@
     }
   }
 
-  // Search results load the next page automatically near the bottom of the list.
+  // The next page loads automatically near the bottom of the list.
   function maybeLoadMoreResults() {
     if (tab !== 'search' || !more || searching || !scroller) return
-    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 400) runSearch(query, results.length)
+    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 400)
+      runSearch(query, listingArtists ? artists.length : results.length)
   }
 
   $effect(() => {
     if (phase !== 'ready') return
     const q = query
+    // Re-run when the view, sort or artist changes too.
+    void [searchView, songSort, artistSort, selectedArtist]
     const timer = setTimeout(() => runSearch(q, 0), q ? 250 : 0)
     return () => clearTimeout(timer)
   })
+
+  function showArtist(name: string | null) {
+    selectedArtist = name
+    if (scroller) scroller.scrollTop = 0
+  }
+
+  const sortLabel: Record<SongSort | ArtistSort, MessageKey> = {
+    artist: 'room.sortArtist',
+    title: 'room.sortTitle',
+    new: 'room.sortNew',
+    popular: 'room.sortPopular',
+    name: 'room.sortArtistName',
+    count: 'room.sortArtistCount',
+  }
+  const sortShort: Record<SongSort | ArtistSort, MessageKey> = {
+    artist: 'room.sortShortArtist',
+    title: 'room.sortShortTitle',
+    new: 'room.sortShortNew',
+    popular: 'room.sortShortPopular',
+    name: 'room.sortShortName',
+    count: 'room.sortShortCount',
+  }
+  const currentSortShort = $derived(t(sortShort[listingArtists ? artistSort : songSort]))
+
+  // The button next to the search box: choose the view, then the order.
+  function searchMenu() {
+    const check = (on: boolean) => (on ? ' ✓' : '')
+    const setView = (v: SearchView) => {
+      searchView = v
+      storage.set('zkaraver.searchView', v)
+      showArtist(null)
+    }
+    const actions: SheetAction[] = [
+      { label: `🎵 ${t('room.viewSongs')}${check(searchView === 'songs')}`, disabled: searchView === 'songs', run: () => setView('songs') },
+      { label: `👤 ${t('room.viewArtists')}${check(searchView === 'artists')}`, disabled: searchView === 'artists', run: () => setView('artists') },
+    ]
+    if (listingArtists) {
+      for (const s of ARTIST_SORTS)
+        actions.push({
+          label: `⇅ ${t(sortLabel[s])}${check(artistSort === s)}`,
+          disabled: artistSort === s,
+          run: () => {
+            artistSort = s
+            storage.set('zkaraver.artistSort', s)
+          },
+        })
+    } else {
+      for (const s of SONG_SORTS)
+        actions.push({
+          label: `⇅ ${t(sortLabel[s])}${check(songSort === s)}`,
+          disabled: songSort === s,
+          run: () => {
+            songSort = s
+            storage.set('zkaraver.songSort', s)
+          },
+        })
+    }
+    sheet(t('room.searchOptions'), actions)
+  }
 
   // ---- history: oldest first, shown above the current song, loaded in pages ----
   const HISTORY_PAGE = 50
@@ -358,32 +450,7 @@
   }
 
   // Vocal / TV QR / volume live behind one button to keep the fixed top short.
-  function moreControls() {
-    const p = room?.player
-    const cur = room?.current
-    if (!p || !cur) return
-    const actions: SheetAction[] = []
-    if (cur.hasOriginal)
-      actions.push({
-        label: `🎤 ${p.vocal ? t('room.vocalSwitchOff') : t('room.vocalSwitchOn')}`,
-        run: () => control('vocal', p.vocal ? 0 : 1),
-      })
-    actions.push(
-      {
-        label: `🔊 ${t('room.volumeUp')}`,
-        disabled: p.volume >= 100,
-        run: () => control('volume', Math.min(100, p.volume + 10)),
-      },
-      {
-        label: `🔉 ${t('room.volumeDown')}`,
-        disabled: p.volume <= 0,
-        run: () => control('volume', Math.max(0, p.volume - 10)),
-      },
-      { label: `▦ ${p.showQR ? t('room.qrHide') : t('room.qrShow')}`, run: () => control('qr', p.showQR ? 0 : 1) },
-      ...keyActions(p.key, control),
-    )
-    sheet(t('room.moreControls'), actions, `${t('room.volumeNow', { n: p.volume })} · ${keyLabel(p.key)}`)
-  }
+  const moreControls = () => openPlayerControls(() => room, control)
 
   // ---- the list area below the fixed top is the only thing that scrolls ----
   let scroller = $state<HTMLElement>()
@@ -568,13 +635,41 @@
       </nav>
 
       {#if tab === 'search'}
-        <input type="search" bind:value={query} placeholder={t('room.searchPlaceholder')} enterkeyhint="search" />
+        <div class="search-row">
+          <input type="search" bind:value={query} placeholder={t('room.searchPlaceholder')} enterkeyhint="search" />
+          <button class="sort-btn" onclick={searchMenu} aria-label={t('room.searchOptions')}>
+            {searchView === 'artists' ? '👤' : '⇅'} {currentSortShort}
+          </button>
+        </div>
       {/if}
     </div>
 
     <!-- The only scrolling region. -->
     <div class="scroller" bind:this={scroller} bind:clientHeight={viewHeight} onscroll={onScroll}>
-      {#if tab === 'search'}
+      {#if tab === 'search' && listingArtists}
+        <ul class="list artists">
+          {#each artists as a (a.name)}
+            <li>
+              <button class="artist-row" onclick={() => showArtist(a.name)}>
+                <span class="artist-name"><Marquee text={a.name || t('common.unknownArtist')} /></span>
+                <span class="muted count">{t('room.artistSongs', { n: a.songs })}</span>
+                <span class="chev" aria-hidden="true">›</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+        {#if !searching && artists.length === 0}
+          <p class="muted empty">{t('room.noResults')}</p>
+        {/if}
+        {#if more}
+          <p class="muted loading-more">{t('common.loading')}</p>
+        {/if}
+      {:else if tab === 'search'}
+        {#if searchView === 'artists'}
+          <button class="ghost back-row" onclick={() => showArtist(null)}>
+            ← {t('room.allArtists')} · <b>{selectedArtist || t('common.unknownArtist')}</b>
+          </button>
+        {/if}
         <ul class="list">
           {#each results as s (s.id)}
             {@render songRow(s)}
@@ -879,6 +974,53 @@
   .empty {
     text-align: center;
     padding: 24px 0;
+  }
+  .search-row {
+    display: flex;
+    gap: 6px;
+  }
+  .search-row input {
+    flex: 1;
+    min-width: 0;
+  }
+  .sort-btn {
+    flex: none;
+    min-height: 38px;
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+  .artist-row {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: transparent;
+    border: none;
+    padding: 6px 2px;
+    text-align: left;
+  }
+  .artists > li {
+    padding: 4px 0;
+  }
+  .artist-name {
+    flex: 1;
+    min-width: 0;
+    font-weight: 600;
+  }
+  .count {
+    font-size: 0.85rem;
+  }
+  .chev {
+    color: var(--muted);
+    font-size: 1.3rem;
+  }
+  .back-row {
+    width: 100%;
+    text-align: left;
+    padding: 10px 2px;
+    font-size: 0.9rem;
+    border-bottom: 1px solid var(--border);
+    border-radius: 0;
   }
   .loading-more {
     text-align: center;

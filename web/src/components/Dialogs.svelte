@@ -3,9 +3,15 @@
   import { t } from '../lib/i18n'
 
   const d = $derived(dialog.current)
+  const actions = $derived(d?.kind === 'sheet' ? (typeof d.actions === 'function' ? d.actions() : d.actions) : [])
+  const subtitle = $derived(d?.kind === 'sheet' ? (typeof d.subtitle === 'function' ? d.subtitle() : d.subtitle) : undefined)
 
   function choose(a: SheetAction) {
     if (a.disabled) return
+    if (d?.kind === 'sheet' && d.keepOpen) {
+      a.run()
+      return
+    }
     closeDialog()
     a.run()
   }
@@ -34,16 +40,16 @@
       {:else}
         <div class="sheet-head">
           <div class="title">{d.title}</div>
-          {#if d.subtitle}<div class="muted sub">{d.subtitle}</div>{/if}
+          {#if subtitle}<div class="muted sub">{subtitle}</div>{/if}
         </div>
         <div class="actions">
-          {#each d.actions as a (a.label)}
+          {#each actions as a, i (i)}
             <button class="action" class:danger={a.danger} disabled={a.disabled} onclick={() => choose(a)}>
               {a.label}
               {#if a.hint}<span class="hint">{a.hint}</span>{/if}
             </button>
           {/each}
-          <button class="action cancel" onclick={() => closeDialog()}>{t('common.cancel')}</button>
+          <button class="action cancel" onclick={() => closeDialog()}>{d.keepOpen ? t('common.close') : t('common.cancel')}</button>
         </div>
       {/if}
     </div>

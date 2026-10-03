@@ -72,6 +72,17 @@ CREATE TABLE IF NOT EXISTS queue_items (
 	ended_at   INTEGER
 );
 CREATE INDEX IF NOT EXISTS queue_items_room_status ON queue_items(room_id, status);
+-- Play counts for the "most sung" sort.
+CREATE INDEX IF NOT EXISTS queue_items_song ON queue_items(song_id);
+
+-- Volume is a per-player setting: one row per room × player (browser tab).
+CREATE TABLE IF NOT EXISTS player_volumes (
+	room_id    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+	instance   TEXT NOT NULL,
+	volume     INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (room_id, instance)
+);
 
 -- Favorites belong to a nickname (not a device), so the same name on another
 -- device or in another room sees the same list.

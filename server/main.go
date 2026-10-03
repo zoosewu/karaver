@@ -16,6 +16,7 @@ import (
 	"zkaraver/internal/api"
 	"zkaraver/internal/config"
 	"zkaraver/internal/db"
+	"zkaraver/internal/keys"
 	"zkaraver/internal/library"
 	"zkaraver/internal/room"
 	"zkaraver/web"
@@ -48,6 +49,8 @@ func main() {
 	defer database.Close()
 
 	lib := library.New(database, cfg)
+	keyR := keys.New(cfg.DataDir, cfg.MediaDir, lib)
+	lib.OnScan = keyR.Cleanup // drops renders of changed videos
 	lib.StartScan()
 
 	rooms, err := room.NewManager(database, lib)
@@ -55,7 +58,8 @@ func main() {
 		log.Fatalf("load rooms: %v", err)
 	}
 
-	srv, err := api.New(cfg, database, lib, rooms, web.FS())
+	rooms.SetKeys(keyR)
+	srv, err := api.New(cfg, database, lib, rooms, keyR, web.FS())
 	if err != nil {
 		log.Fatalf("api: %v", err)
 	}
@@ -63,6 +67,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go rooms.RunIdleSweeper(ctx)
+	keyR.Start(ctx, rooms.QueuedSongs, rooms.KeysReady)
 
 	httpServer := &http.Server{
 		Addr:              cfg.Listen,

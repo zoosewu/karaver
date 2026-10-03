@@ -12,7 +12,15 @@ export interface SheetAction {
 
 type Dialog =
   | { kind: 'confirm'; message: string; confirmText: string; danger: boolean; resolve: (ok: boolean) => void }
-  | { kind: 'sheet'; title: string; subtitle?: string; actions: SheetAction[] }
+  | {
+      kind: 'sheet'
+      title: string
+      // Functions are re-evaluated on every render, so a sheet that stays open shows
+      // the current values (e.g. the volume) after each choice.
+      subtitle?: string | (() => string)
+      actions: SheetAction[] | (() => SheetAction[])
+      keepOpen: boolean
+    }
 
 export const dialog = $state<{ current: Dialog | null }>({ current: null })
 
@@ -33,8 +41,14 @@ export async function askTwice(message: string, second: string, confirmText?: st
   return (await ask(message, { danger: true, confirmText })) && (await ask(second, { danger: true, confirmText }))
 }
 
-export function sheet(title: string, actions: SheetAction[], subtitle?: string) {
-  dialog.current = { kind: 'sheet', title, subtitle, actions }
+/** keepOpen: choosing an option does not close the sheet (for repeated adjustments). */
+export function sheet(
+  title: string,
+  actions: SheetAction[] | (() => SheetAction[]),
+  subtitle?: string | (() => string),
+  opts: { keepOpen?: boolean } = {},
+) {
+  dialog.current = { kind: 'sheet', title, subtitle, actions, keepOpen: opts.keepOpen ?? false }
 }
 
 export function closeDialog(ok = false) {

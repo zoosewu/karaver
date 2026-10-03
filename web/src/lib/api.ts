@@ -63,7 +63,21 @@ export function userToken(): string {
   return storage.get(TOKEN_KEY) ?? ''
 }
 
-export function searchSongs(q: string, offset: number) {
-  const p = new URLSearchParams({ q, offset: String(offset), limit: '50' })
+export type SongSort = 'artist' | 'title' | 'new' | 'popular'
+export type ArtistSort = 'name' | 'count'
+export interface Artist {
+  name: string // "" = unknown artist
+  songs: number
+}
+
+/** artist: only that artist's songs ("" = unknown artist); omit for all. */
+export function searchSongs(q: string, offset: number, sort: SongSort = 'artist', artist?: string) {
+  const p = new URLSearchParams({ q, offset: String(offset), limit: '50', sort })
+  if (artist !== undefined) p.set('artist', artist)
   return api<{ items: Song[]; more: boolean }>('GET', `/api/songs?${p}`)
+}
+
+export function listArtists(q: string, offset: number, sort: ArtistSort = 'name') {
+  const p = new URLSearchParams({ q, offset: String(offset), limit: '100', sort })
+  return api<{ items: Artist[]; more: boolean }>('GET', `/api/artists?${p}`)
 }

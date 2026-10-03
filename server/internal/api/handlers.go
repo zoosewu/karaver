@@ -14,7 +14,9 @@ import (
 )
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"publicUrl": s.cfg.PublicURL})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"publicUrl": s.cfg.PublicURL,
+	})
 }
 
 // handleSession validates a stored token or issues a new anonymous identity.
@@ -42,7 +44,14 @@ func (s *Server) handleSongs(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	songs, more, err := s.lib.Search(q.Get("q"), limit, max(offset, 0))
+	// ?sort=artist|title|new|popular, and ?artist=<name> to browse one artist
+	// ("" is the unknown artist, so presence matters, not the value).
+	songs, more, err := s.lib.SearchWith(library.SearchOptions{
+		Query:     q.Get("q"),
+		Sort:      q.Get("sort"),
+		Artist:    q.Get("artist"),
+		HasArtist: q.Has("artist"),
+	}, limit, max(offset, 0))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -80,7 +89,11 @@ func (s *Server) handleOriginal(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveMediaFile(w http.ResponseWriter, r *http.Request, rel string) {
-	f, err := os.Open(filepath.Join(s.cfg.MediaDir, filepath.FromSlash(rel)))
+	s.serveFile(w, r, filepath.Join(s.cfg.MediaDir, filepath.FromSlash(rel)))
+}
+
+func (s *Server) serveFile(w http.ResponseWriter, r *http.Request, path string) {
+	f, err := os.Open(path)
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -91,7 +104,10 @@ func (s *Server) serveMediaFile(w http.ResponseWriter, r *http.Request, rel stri
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Cache-Control", "private, max-age=3600")
+	// Browsers may cache the video but must ask first: a replaced file keeps the
+	// same URL, and a fixed max-age would keep playing the old one. ServeContent
+	// answers that question with 304 (via Last-Modified) when nothing changed.
+	w.Header().Set("Cache-Control", "no-cache")
 	// ServeContent handles Range requests, so the browser streams and seeks without transcoding.
 	http.ServeContent(w, r, st.Name(), st.ModTime(), f)
 }
@@ -627,4 +643,20 @@ func (s *Server) handleClearHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": n})
+}
+
+// handleArtists lists artists with their song counts: ?q=…&sort=name|count.
+func (s *Server) handleArtists(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	artists, more, err := s.lib.Artists(q.Get("q"), q.Get("sort"), limit, max(offset, 0))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": artists, "more": more})
 }

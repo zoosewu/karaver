@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"zkaraver/internal/config"
+	"zkaraver/internal/keys"
 )
 
 type Song struct {
@@ -42,6 +43,9 @@ type Library struct {
 	mu       sync.Mutex
 	scanning bool
 	last     *Result
+
+	// OnScan runs after every successful scan (set before the first StartScan).
+	OnScan func()
 }
 
 // New returns a library backed by the songs table. Songs are not cached in
@@ -73,6 +77,9 @@ func (l *Library) StartScan() bool {
 		} else {
 			log.Printf("library scan: %d songs (+%d ~%d -%d) in %dms",
 				res.Total, res.Added, res.Updated, res.Removed, res.DurationMs)
+			if l.OnScan != nil {
+				l.OnScan()
+			}
 		}
 		l.mu.Lock()
 		l.scanning = false
@@ -272,22 +279,70 @@ func normalize(s string) string {
 	return b.String()
 }
 
-// Search matches songs whose normalized "artist title" contains every
-// whitespace-separated term of q (each term normalized the same way). Terms
-// that normalize to nothing (pure punctuation) are ignored. Normalized text has
-// no LIKE wildcards, but instr() avoids escaping altogether.
-func (l *Library) Search(q string, limit, offset int) (songs []Song, more bool, err error) {
-	where := []string{"present = 1"}
-	args := []any{}
+// Song sort orders for SearchOptions.Sort.
+const (
+	SortArtist  = "artist"  // artist, then title (default)
+	SortTitle   = "title"   // title, then artist
+	SortNewest  = "new"     // most recently added first
+	SortPopular = "popular" // most sung (all rooms) first
+)
+
+// Artist sort orders for Artists.
+const (
+	ArtistSortName  = "name"
+	ArtistSortCount = "count"
+)
+
+type SearchOptions struct {
+	Query string
+	Sort  string
+	// Artist limits results to one artist (exact match; "" = unknown artist)
+	// when HasArtist is set.
+	Artist    string
+	HasArtist bool
+}
+
+// termsWhere turns a query into "instr(search, ?) > 0" conditions: every
+// whitespace-separated term, normalized, must appear. Terms that normalize to
+// nothing (pure punctuation) are ignored. Normalized text has no LIKE
+// wildcards, but instr() avoids escaping altogether.
+func termsWhere(q string) (where []string, args []any) {
 	for _, f := range strings.Fields(q) {
 		if t := normalize(f); t != "" {
 			where = append(where, "instr(search, ?) > 0")
 			args = append(args, t)
 		}
 	}
+	return where, args
+}
+
+// Search matches songs by query, sorted by artist (see SearchWith).
+func (l *Library) Search(q string, limit, offset int) (songs []Song, more bool, err error) {
+	return l.SearchWith(SearchOptions{Query: q}, limit, offset)
+}
+
+// SearchWith matches songs whose normalized "artist title" contains every
+// term of the query, optionally within one artist, in the requested order.
+func (l *Library) SearchWith(o SearchOptions, limit, offset int) (songs []Song, more bool, err error) {
+	where, args := termsWhere(o.Query)
+	where = append([]string{"present = 1"}, where...)
+	if o.HasArtist {
+		where = append(where, "artist = ?")
+		args = append(args, o.Artist)
+	}
+	order := "artist, title, id"
+	switch o.Sort {
+	case SortTitle:
+		order = "title, artist, id"
+	case SortNewest:
+		order = "id DESC"
+	case SortPopular:
+		// Songs that were actually started (sung or skipped), in any room.
+		order = `(SELECT COUNT(*) FROM queue_items q WHERE q.song_id = songs.id AND q.started_at IS NOT NULL) DESC, artist, title, id`
+	}
 	args = append(args, limit+1, offset)
 	rows, err := l.db.Query(`SELECT id, title, artist FROM songs WHERE `+strings.Join(where, " AND ")+
-		` ORDER BY artist, title, id LIMIT ? OFFSET ?`, args...)
+		` ORDER BY `+order+` LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -304,6 +359,41 @@ func (l *Library) Search(q string, limit, offset int) (songs []Song, more bool, 
 		return songs[:limit], true, rows.Err()
 	}
 	return songs, false, rows.Err()
+}
+
+type Artist struct {
+	Name  string `json:"name"` // "" = unknown artist
+	Songs int    `json:"songs"`
+}
+
+// Artists lists artists with how many songs each has. With a query, only
+// artists that have a matching song (by title or artist name) are listed.
+func (l *Library) Artists(q, sort string, limit, offset int) (artists []Artist, more bool, err error) {
+	where, args := termsWhere(q)
+	where = append([]string{"present = 1"}, where...)
+	order := "artist"
+	if sort == ArtistSortCount {
+		order = "COUNT(*) DESC, artist"
+	}
+	args = append(args, limit+1, offset)
+	rows, err := l.db.Query(`SELECT artist, COUNT(*) FROM songs WHERE `+strings.Join(where, " AND ")+
+		` GROUP BY artist ORDER BY `+order+` LIMIT ? OFFSET ?`, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	artists = []Artist{}
+	for rows.Next() {
+		var a Artist
+		if err := rows.Scan(&a.Name, &a.Songs); err != nil {
+			return nil, false, err
+		}
+		artists = append(artists, a)
+	}
+	if len(artists) > limit {
+		return artists[:limit], true, rows.Err()
+	}
+	return artists, false, rows.Err()
 }
 
 var ErrNotFound = errors.New("song not found")
@@ -374,4 +464,29 @@ func (l *Library) AddFavorite(username string, songID int64) error {
 func (l *Library) RemoveFavorite(username string, songID int64) error {
 	_, err := l.db.Exec(`DELETE FROM favorites WHERE username=? AND song_id=?`, username, songID)
 	return err
+}
+
+// KeySong returns a present song's file for key rendering.
+func (l *Library) KeySong(id int64) (keys.Song, bool) {
+	s := keys.Song{ID: id}
+	err := l.db.QueryRow(`SELECT path, size, mtime FROM songs WHERE id=? AND present=1`, id).Scan(&s.Path, &s.Size, &s.Mtime)
+	return s, err == nil
+}
+
+// KeySongs lists every present song for key rendering, newest file first.
+func (l *Library) KeySongs() ([]keys.Song, error) {
+	rows, err := l.db.Query(`SELECT id, path, size, mtime FROM songs WHERE present=1 ORDER BY mtime DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []keys.Song
+	for rows.Next() {
+		var s keys.Song
+		if err := rows.Scan(&s.ID, &s.Path, &s.Size, &s.Mtime); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }

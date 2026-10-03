@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"zkaraver/internal/config"
@@ -336,5 +337,82 @@ func TestScanRefreshesSearchKey(t *testing.T) {
 	}
 	if got := titles(t, l, "五月天倔強"); len(got) != 1 {
 		t.Fatalf("after rescan = %v", got)
+	}
+}
+
+func TestSortsAndArtists(t *testing.T) {
+	l, media := newLib(t, config.Config{})
+	for _, f := range []string{"B - zebra.mp4", "A - mango.mp4", "A - apple.mp4", "C - banana.mp4", "no artist.mp4"} {
+		touch(t, media, f)
+	}
+	scan(t, l)
+	ids := map[string]int64{}
+	all, _, _ := l.Search("", 10, 0)
+	for _, s := range all {
+		ids[s.Title] = s.ID
+	}
+	order := func(o SearchOptions) string {
+		songs, _, err := l.SearchWith(o, 10, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, s := range songs {
+			out = append(out, s.Title)
+		}
+		return strings.Join(out, ",")
+	}
+	if got := order(SearchOptions{}); got != "no artist,apple,mango,zebra,banana" {
+		t.Errorf("by artist = %s", got)
+	}
+	if got := order(SearchOptions{Sort: SortTitle}); got != "apple,banana,mango,no artist,zebra" {
+		t.Errorf("by title = %s", got)
+	}
+	// Newest = highest id first.
+	newest, _, _ := l.SearchWith(SearchOptions{Sort: SortNewest}, 10, 0)
+	for i := 1; i < len(newest); i++ {
+		if newest[i-1].ID < newest[i].ID {
+			t.Fatalf("newest not descending: %v", newest)
+		}
+	}
+	// Most sung: count started queue items.
+	l.db.Exec(`INSERT INTO rooms(id, name, created_at) VALUES('r', 'r', 0)`)
+	for i, title := range []string{"banana", "banana", "mango"} {
+		l.db.Exec(`INSERT INTO queue_items(room_id, song_id, user_id, status, position, created_at, started_at) VALUES('r', ?, 'u', 'done', ?, 0, 1)`, ids[title], i)
+	}
+	l.db.Exec(`INSERT INTO queue_items(room_id, song_id, user_id, status, position, created_at) VALUES('r', ?, 'u', 'queued', 9, 0)`, ids["zebra"]) // never started
+	if got := order(SearchOptions{Sort: SortPopular}); !strings.HasPrefix(got, "banana,mango,") {
+		t.Errorf("most sung = %s", got)
+	}
+
+	// One artist; "" is the unknown artist; the query still applies inside it.
+	if got := order(SearchOptions{Artist: "A", HasArtist: true}); got != "apple,mango" {
+		t.Errorf("artist A = %s", got)
+	}
+	if got := order(SearchOptions{Artist: "", HasArtist: true}); got != "no artist" {
+		t.Errorf("unknown artist = %s", got)
+	}
+	if got := order(SearchOptions{Artist: "A", HasArtist: true, Query: "man"}); got != "mango" {
+		t.Errorf("artist A + query = %s", got)
+	}
+
+	artists, more, err := l.Artists("", ArtistSortName, 10, 0)
+	if err != nil || more {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(artists) != "[{ 1} {A 2} {B 1} {C 1}]" {
+		t.Errorf("artists by name = %v", artists)
+	}
+	byCount, _, _ := l.Artists("", ArtistSortCount, 10, 0)
+	if byCount[0].Name != "A" {
+		t.Errorf("artists by count = %v", byCount)
+	}
+	// A query lists artists that have a matching song.
+	if found, _, _ := l.Artists("banana", ArtistSortName, 10, 0); fmt.Sprint(found) != "[{C 1}]" {
+		t.Errorf("artists matching banana = %v", found)
+	}
+	page, more, _ := l.Artists("", ArtistSortName, 2, 0)
+	if len(page) != 2 || !more {
+		t.Errorf("paging: %v %v", page, more)
 	}
 }

@@ -12,6 +12,7 @@ const media = (page: Page) =>
   })
 
 test('player: autoplay, original vocals in sync, overlay, screen kept awake', async ({ page }) => {
+  test.setTimeout(120_000)
   const cookie = await adminCookie()
   const room = await createRoom(cookie)
   const user = await newUser(room, 'singer')
@@ -32,6 +33,13 @@ test('player: autoplay, original vocals in sync, overlay, screen kept awake', as
   await expect.poll(async () => (await media(page)).muted).toBe(true)
   m = await media(page)
   expect(Math.abs(m.at - m.vt)).toBeLessThan(0.35)
+
+  // Original vocals keep their own key even once the karaoke track is rendered.
+  await expect.poll(async () => (await roomState(room, user)).player.keysReady, { timeout: 60_000 }).toContain(1)
+  await control(room, cookie, 'key', 1)
+  await expect(page.locator('.key-badge')).toHaveText('Key +1（原唱不變調）')
+  expect(await audioSrc(page)).toMatch(/\/original$/)
+  await control(room, cookie, 'key', 0)
 
   await control(room, cookie, 'restart')
   await expect.poll(async () => (await media(page)).vt).toBeLessThan(2)
@@ -60,24 +68,28 @@ test('player: autoplay, original vocals in sync, overlay, screen kept awake', as
   }
 })
 
-// Dominant frequency (Hz) and its level (dB) at the end of the TV's audio graph.
-const outputPitch = (page: Page) =>
-  page.evaluate(() => {
-    const ks = (window as any).__zkKeyShift
-    if (!ks) return null
-    const a: AnalyserNode = ks.analyser
-    const data = new Float32Array(a.frequencyBinCount)
-    a.getFloatFrequencyData(data)
-    let best = 0
-    for (let i = 1; i < data.length; i++) if (data[i] > data[best]) best = i
-    return { hz: (best * ks.ctx.sampleRate) / a.fftSize, db: data[best] }
-  })
+// Pitch (Hz) of a rendered key track: zero crossings of the decoded audio over 10 s.
+const trackPitch = (page: Page, url: string) =>
+  page.evaluate(async (u) => {
+    const data = await (await fetch(u)).arrayBuffer()
+    const audio = await new OfflineAudioContext(1, 1, 44100).decodeAudioData(data)
+    const d = audio.getChannelData(0)
+    const from = 5 * audio.sampleRate
+    const to = 15 * audio.sampleRate
+    let crossings = 0
+    for (let i = from + 1; i < to; i++) if (d[i - 1] < 0 !== d[i] < 0) crossings++
+    return crossings / 2 / 10
+  }, url)
 
-test('player: key change, speed and ±3 s seeking', async ({ page }) => {
+const audioSrc = (page: Page) => page.evaluate(() => document.querySelector('audio')?.getAttribute('src') ?? '')
+
+test('player: key change from server renders, speed and ±3 s seeking', async ({ page }) => {
+  test.setTimeout(120_000)
   const cookie = await adminCookie()
   const room = await createRoom(cookie)
   const user = await newUser(room, 'singer')
-  await enqueue(room, user, await songId('晴天')) // a 440 Hz tone
+  const song = await songId('晴天') // a 440 Hz tone
+  await enqueue(room, user, song)
   await enqueue(room, user, await songId('遇見'))
 
   await page.goto(`/r/${room}/player`)
@@ -87,6 +99,7 @@ test('player: key change, speed and ±3 s seeking', async ({ page }) => {
   await control(room, cookie, 'rate', 125)
   await expect.poll(() => page.evaluate(() => (document.querySelector('video:not(.nosleep)') as HTMLVideoElement).playbackRate)).toBe(1.25)
   expect(await page.evaluate(() => (document.querySelector('video:not(.nosleep)') as HTMLVideoElement).preservesPitch)).toBe(true)
+  await control(room, cookie, 'rate', 100)
 
   // ±3 seconds.
   const before = (await media(page)).vt
@@ -96,31 +109,35 @@ test('player: key change, speed and ±3 s seeking', async ({ page }) => {
   await control(room, cookie, 'seek', -3)
   await expect.poll(async () => (await media(page)).vt).toBeLessThan(ahead - 2)
 
-  // Audio is untouched until someone changes the key.
-  expect(await outputPitch(page)).toBeNull()
+  // The playing song is rendered first: ±1..±3, then ±4..±6.
+  expect((await roomState(room, user)).player.keyAvailable).toBe(true)
+  await expect
+    .poll(async () => (await roomState(room, user)).player.keysReady, { timeout: 60_000 })
+    .toEqual(expect.arrayContaining([-3, -2, -1, 1, 2, 3]))
 
-  const near = (hz: number, want: number) => Math.abs(hz - want) / want < 0.03
-  await control(room, cookie, 'key', 5) // 440 × 2^(5/12) ≈ 587 Hz
-  await expect.poll(async () => near((await outputPitch(page))?.hz ?? 0, 587.3), { timeout: 5000 }).toBe(true)
-  await expect(page.locator('.key-badge')).toHaveText('Key +5')
+  // A rendered key plays at once: the video is muted under the track, in sync.
+  await control(room, cookie, 'key', 2)
+  await expect.poll(() => audioSrc(page)).toBe(`/media/${song}/key/2`)
+  await expect.poll(async () => (await media(page)).aPaused).toBe(false)
+  await expect.poll(async () => (await media(page)).muted).toBe(true)
+  const m = await media(page)
+  expect(Math.abs(m.at - m.vt)).toBeLessThan(0.35)
+  await expect(page.locator('.key-badge')).toHaveText('Key +2')
+  await expect(page.locator('.key-notice')).toHaveCount(0)
+  const hz = await trackPitch(page, `/media/${song}/key/2`) // 440 × 2^(2/12) ≈ 494 Hz
+  expect(Math.abs(hz - 493.9) / 493.9).toBeLessThan(0.02)
 
-  await control(room, cookie, 'key', -5) // ≈ 330 Hz
-  await expect.poll(async () => near((await outputPitch(page))?.hz ?? 0, 329.6), { timeout: 5000 }).toBe(true)
+  // Volume and speed apply to the track.
+  await control(room, cookie, 'volume', 20)
+  await expect.poll(() => page.evaluate(() => document.querySelector('audio')!.volume)).toBeCloseTo(0.2)
+  await control(room, cookie, 'volume', 100)
 
-  await control(room, cookie, 'key', 0) // bypassed: the original 440 Hz
-  await expect.poll(async () => near((await outputPitch(page))?.hz ?? 0, 440), { timeout: 5000 }).toBe(true)
+  // Back to the original key: the video's own audio again.
+  await control(room, cookie, 'key', 0)
+  await expect.poll(async () => (await media(page)).muted).toBe(false)
   await expect(page.locator('.key-badge')).toHaveCount(0)
 
-  // Volume still works with the audio routed through the graph (a clear drop; the
-  // exact dB depends on how the browser applies element volume to the graph).
-  await control(room, cookie, 'volume', 100)
-  await page.waitForTimeout(500)
-  const loud = (await outputPitch(page))!.db
-  await control(room, cookie, 'volume', 20)
-  await expect.poll(async () => loud - (await outputPitch(page))!.db).toBeGreaterThan(5)
-  await control(room, cookie, 'volume', 100)
-
-  // Next song: normal speed and the original key again.
+  // Next song: the original key again.
   await control(room, cookie, 'key', 3)
   const cur = await fetch(`${BASE}/api/rooms/${room}/skip`, {
     method: 'POST',
@@ -129,6 +146,46 @@ test('player: key change, speed and ±3 s seeking', async ({ page }) => {
   })
   expect(cur.status).toBe(204)
   await expect.poll(async () => (await media(page)).vt, { timeout: 15_000 }).toBeGreaterThan(1)
-  expect(await page.evaluate(() => (document.querySelector('video:not(.nosleep)') as HTMLVideoElement).playbackRate)).toBe(1)
-  await expect.poll(async () => near((await outputPitch(page))?.hz ?? 0, 440), { timeout: 5000 }).toBe(true)
+  expect((await roomState(room, user)).player.key).toBe(0)
+  expect(await audioSrc(page)).toBe('')
+  expect((await media(page)).muted).toBe(false)
+})
+
+test('player: a key that is not rendered yet plays the original key and switches when ready', async ({ page }) => {
+  const cookie = await adminCookie()
+  const room = await createRoom(cookie)
+  const user = await newUser(room, 'singer')
+  const song = await songId('晴天')
+  await enqueue(room, user, song)
+
+  // Test media renders in a blink, so pretend nothing is ready by hiding the
+  // rendered keys from the TV's room snapshots until `hide` is cleared.
+  let hide = true
+  await page.routeWebSocket(/\/player\/ws/, (ws) => {
+    const server = ws.connectToServer()
+    server.onMessage((msg) => {
+      if (hide && typeof msg === 'string') {
+        const s = JSON.parse(msg)
+        if (s.type === 'state') {
+          s.player.keysReady = []
+          msg = JSON.stringify(s)
+        }
+      }
+      ws.send(msg)
+    })
+  })
+  await page.goto(`/r/${room}/player`)
+  await expect.poll(async () => (await media(page)).vt, { timeout: 15_000 }).toBeGreaterThan(1)
+
+  await control(room, cookie, 'key', -4)
+  await expect(page.locator('.key-notice')).toHaveText('Key -4 還在製作中，先以原調播放')
+  expect(await audioSrc(page)).toBe('')
+  expect((await media(page)).muted).toBe(false)
+  await expect(page.locator('.key-notice')).toHaveCount(0, { timeout: 5000 }) // brief
+
+  // Rendered: the next snapshot lists the key and the TV switches by itself.
+  hide = false
+  await control(room, cookie, 'qr', 0) // any change sends a new snapshot
+  await expect.poll(() => audioSrc(page)).toBe(`/media/${song}/key/-4`)
+  await expect.poll(async () => (await media(page)).muted).toBe(true)
 })

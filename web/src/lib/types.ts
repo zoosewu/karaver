@@ -50,8 +50,12 @@ export interface RoomState {
     /** changes on every relative seek; seekDelta is how many seconds */
     seekNonce: number
     seekDelta: number
-    /** key change in semitones (-6..6), applied on the TV */
+    /** key change in semitones (-6..6) */
     key: number
+    /** the server can change key (images with ffmpeg); otherwise key buttons are hidden */
+    keyAvailable: boolean
+    /** keys of the current song already rendered by the server */
+    keysReady: number[]
   }
   members: Member[]
   /** Admin connections only: every connected player, active one first. */

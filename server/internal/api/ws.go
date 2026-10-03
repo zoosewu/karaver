@@ -28,7 +28,11 @@ func (s *Server) handleMemberWS(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePlayerWS(w http.ResponseWriter, r *http.Request) {
 	if rm, ok := s.room(w, r); ok {
-		s.serveWS(w, r, rm, room.NewPlayerClient(clientAddr(r), r.UserAgent()))
+		c := room.NewPlayerClient(clientAddr(r), r.UserAgent())
+		if inst := r.URL.Query().Get("instance"); len(inst) <= 64 {
+			c.Instance = inst
+		}
+		s.serveWS(w, r, rm, c)
 	}
 }
 

@@ -2,7 +2,6 @@
   import { onMount, untrack } from 'svelte'
   import Marquee from '../components/Marquee.svelte'
   import { api } from '../lib/api'
-  import { KeyShift } from '../lib/keyshift'
   import { t } from '../lib/i18n'
   import { toast } from '../lib/toast.svelte'
   import { connectRoom } from '../lib/ws'
@@ -13,12 +12,12 @@
   const INTRO_MS = 5000
   const MAX_DRIFT_S = 0.3
 
-  type Phase = 'checking' | 'playing' | 'kicked' | 'notFound'
+  type Phase = 'checking' | 'playing' | 'kicked' | 'superseded' | 'notFound'
   let phase = $state<Phase>('checking')
   let room = $state<RoomState | null>(null)
   let roomUrl = $state('')
   let video = $state<HTMLVideoElement>()
-  let original = $state<HTMLAudioElement>()
+  let alt = $state<HTMLAudioElement>()
 
   // The item whose video is loaded, and whether its "up next" intro is showing.
   let loaded = $state<QueueItem | null>(null)
@@ -37,6 +36,8 @@
   const rate = $derived((room?.player.rate ?? 100) / 100)
   const seekNonce = $derived(room?.player.seekNonce ?? 0)
   const key = $derived(active ? (room?.player.key ?? 0) : 0)
+  // Keys of the current song the server has rendered (see server/internal/keys).
+  const keyReady = $derived(key !== 0 && (room?.player.keysReady ?? []).includes(key))
   const upNext = $derived(room?.queue[0] ?? null)
   const qrSrc = $derived(`/api/rooms/${roomId}/qr.png`)
 
@@ -53,6 +54,22 @@
     }
   })
 
+  // One ID per browser tab, kept in sessionStorage so reconnects and reloads
+  // reclaim the same place in the player line (see Room.addPlayerLocked).
+  function instanceId(): string {
+    const key = 'zkaraver.playerInstance'
+    try {
+      let id = sessionStorage.getItem(key)
+      if (!id) {
+        id = crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+        sessionStorage.setItem(key, id)
+      }
+      return id
+    } catch {
+      return '' // no storage: behave like before (queue on every connect)
+    }
+  }
+
   function reconnect() {
     room = null
     phase = 'playing'
@@ -61,9 +78,10 @@
 
   $effect(() => {
     if (phase !== 'playing') return
-    return connectRoom(`/api/rooms/${roomId}/player/ws`, {
+    return connectRoom(`/api/rooms/${roomId}/player/ws?instance=${encodeURIComponent(instanceId())}`, {
       onState: (s) => (room = s),
-      onTerminal: (reason) => (phase = reason === 'kicked' ? 'kicked' : 'notFound'),
+      onTerminal: (reason) =>
+        (phase = reason === 'kicked' ? 'kicked' : reason === 'superseded' ? 'superseded' : 'notFound'),
     })
   })
 
@@ -92,54 +110,23 @@
   function unlock() {
     if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {})
     if (blocked) tryPlay()
-    syncOriginal()
-    keyRetry++ // a tap is what lets the audio graph start
+    syncAlt()
   }
 
-  // ---- key change (see lib/keyshift.ts) ----
-  // Audio is only re-routed once someone asks for a key change, and only if the
-  // browser lets the AudioContext run; otherwise the TV asks for one tap instead
-  // of going silent.
-  let keyShift: KeyShift | null = null
-  let keyWaiting = $state(false)
-  let keyRetry = $state(0)
-
-  let creating: Promise<KeyShift | null> | null = null
-  function ensureKeyShift(): Promise<KeyShift | null> {
-    if (keyShift) return Promise.resolve(keyShift)
-    // Share one in-flight attempt so quick key presses never build two graphs.
-    creating ??= (async () => {
-      const ks = new KeyShift()
-      await ks.resume()
-      creating = null
-      if (!ks.running) {
-        ks.close()
-        return null
-      }
-      keyShift = ks
-      // Test hook: the e2e suite reads the output pitch from ks.analyser.
-      ;(window as unknown as { __zkKeyShift?: KeyShift }).__zkKeyShift = ks
-      return ks
-    })()
-    return creating
-  }
-
+  // ---- key change ----
+  // The server renders every queued song at ±1..±6 ahead of time; the TV plays the
+  // rendered track (see altSrc). If a key is asked for before it is ready, the TV
+  // says so briefly and keeps the original key, switching over once it arrives.
+  let keyNotice = $state(0)
   $effect(() => {
-    const n = key
-    const v = video
-    const o = original
-    void keyRetry
-    if (n === 0 && !keyShift) {
-      keyWaiting = false
-      return
+    const k = key
+    if (!loaded || k === 0 || untrack(() => vocal || keyReady)) return
+    keyNotice = k
+    const timer = setTimeout(() => (keyNotice = 0), 3000)
+    return () => {
+      clearTimeout(timer)
+      keyNotice = 0
     }
-    ensureKeyShift().then((ks) => {
-      keyWaiting = !ks && n !== 0
-      if (!ks) return
-      if (v) ks.attach(v)
-      if (o) ks.attach(o)
-      ks.setSemitones(n)
-    })
   })
 
   // ---- keep the screen awake ----
@@ -195,7 +182,7 @@
   $effect(() => {
     const v = volume / 100
     if (video) video.volume = v
-    if (original) original.volume = v
+    if (alt) alt.volume = v
   })
 
   let lastNonce: number | null = null
@@ -214,7 +201,7 @@
     void loaded
     const r = rate
     if (video) video.playbackRate = r
-    if (original) original.playbackRate = r
+    if (alt) alt.playbackRate = r
   })
 
   // Relative seek (±3 s from the admin page). The original-vocal track follows
@@ -241,30 +228,45 @@
       })
   }
 
-  // ---- original vocals: karaoke video + audio from the original-vocal file ----
-  // Both files are assumed to share a timeline. The original's audio follows the
-  // video's clock; the video is muted only once the original is actually audible.
-  let originalPlaying = $state(false)
+  // ---- alternate audio: the karaoke video plays muted under another track ----
+  // Used for original vocals (audio from the original-vocal file, never key-shifted)
+  // and for key changes (audio rendered at another key by the server).
+  // Files are assumed to share a timeline. The track follows the video's clock;
+  // the video is muted only once the track is actually audible.
+  let altPlaying = $state(false)
+  let altFailed = $state('') // src that failed to load: fall back to the video's audio
 
-  function syncOriginal() {
-    if (!original || !video) return
-    if (!vocal || video.paused || video.ended) {
-      if (!original.paused) original.pause()
+  const altSrc = $derived.by(() => {
+    if (!loaded) return ''
+    if (vocal && loaded.hasOriginal) return `/media/${loaded.songId}/original`
+    return keyReady ? `/media/${loaded.songId}/key/${key}` : ''
+  })
+  const altActive = $derived(altSrc !== '' && altSrc !== altFailed)
+
+  function syncAlt() {
+    if (!alt || !video) return
+    if (!altActive || video.paused || video.ended) {
+      if (!alt.paused) alt.pause()
       return
     }
-    if (Math.abs(original.currentTime - video.currentTime) > MAX_DRIFT_S) original.currentTime = video.currentTime
-    if (original.paused) original.play().catch(() => {})
+    if (Math.abs(alt.currentTime - video.currentTime) > MAX_DRIFT_S) alt.currentTime = video.currentTime
+    if (alt.paused) alt.play().catch(() => {})
   }
 
   $effect(() => {
-    void vocal
-    void original
-    syncOriginal()
+    void altActive
+    void alt
+    syncAlt()
   })
 
   $effect(() => {
-    if (video) video.muted = vocal && originalPlaying
+    if (video) video.muted = altActive && altPlaying
   })
+
+  function altError(src: string) {
+    altPlaying = false
+    altFailed = src
+  }
 
   function report(failed: boolean) {
     const item = loaded
@@ -279,6 +281,13 @@
   <main class="center-screen"><p class="muted">{t('common.loading')}</p></main>
 {:else if phase === 'notFound'}
   <main class="center-screen"><h2>{t('room.notFound')}</h2></main>
+{:else if phase === 'superseded'}
+  <main class="center-screen">
+    <div class="narrow">
+      <h2>{t('player.superseded')}</h2>
+      <button class="primary" onclick={reconnect}>{t('player.useThisTab')}</button>
+    </div>
+  </main>
 {:else if phase === 'kicked'}
   <main class="center-screen">
     <div class="narrow">
@@ -304,26 +313,26 @@
           autoplay
           playsinline
           onended={() => {
-            syncOriginal()
+            syncAlt()
             report(false)
           }}
           onerror={() => report(true)}
-          onplay={syncOriginal}
-          onpause={syncOriginal}
-          onseeked={syncOriginal}
-          ontimeupdate={syncOriginal}
+          onplay={syncAlt}
+          onpause={syncAlt}
+          onseeked={syncAlt}
+          ontimeupdate={syncAlt}
         ></video>
-        {#if loaded.hasOriginal}
-          {#key loaded.id}
+        {#if altSrc}
+          {#key altSrc}
             <audio
-              bind:this={original}
-              src={`/media/${loaded.songId}/original`}
+              bind:this={alt}
+              src={altSrc}
               preload="metadata"
-              onloadedmetadata={syncOriginal}
-              onplaying={() => (originalPlaying = true)}
-              onpause={() => (originalPlaying = false)}
-              onwaiting={() => (originalPlaying = false)}
-              onerror={() => (originalPlaying = false)}
+              onloadedmetadata={syncAlt}
+              onplaying={() => (altPlaying = true)}
+              onpause={() => (altPlaying = false)}
+              onwaiting={() => (altPlaying = false)}
+              onerror={() => altError(altSrc)}
             ></audio>
           {/key}
         {/if}
@@ -365,11 +374,14 @@
 
     {#if !fullscreen}
       <div class="tap-hint">{t('player.tapForFullscreen')}</div>
-    {:else if keyWaiting}
-      <div class="tap-hint">{t('player.tapForKey')}</div>
+    {/if}
+    {#if keyNotice}
+      <div class="key-notice">{t('player.keyNotReady', { n: keyNotice > 0 ? `+${keyNotice}` : `${keyNotice}` })}</div>
     {/if}
     {#if key !== 0}
-      <div class="key-badge">{t('player.key', { n: key > 0 ? `+${key}` : `${key}` })}</div>
+      <div class="key-badge">
+        {t('player.key', { n: key > 0 ? `+${key}` : `${key}` })}{#if vocal && loaded?.hasOriginal}{t('room.keyVocal')}{/if}
+      </div>
     {/if}
 
     {#if wakeFallback}
@@ -403,6 +415,18 @@
     padding: 0.8vh 2vw;
     border-radius: 99px;
     font-size: 2.2vh;
+    pointer-events: none;
+  }
+  .key-notice {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0, 0, 0, 0.75);
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    padding: 1.6vh 3vw;
+    border-radius: 16px;
+    font-size: 3vh;
     pointer-events: none;
   }
   .key-badge {

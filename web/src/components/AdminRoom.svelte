@@ -5,7 +5,7 @@
   import { api, errorCode } from '../lib/api'
   import { errorText, t } from '../lib/i18n'
   import { toast } from '../lib/toast.svelte'
-  import { keyActions, keyLabel } from '../lib/controls'
+  import { keyLabel, openPlayerControls } from '../lib/controls'
   import { connectRoom } from '../lib/ws'
   import type { HistoryEntry, RoomSettings, RoomState } from '../lib/types'
 
@@ -64,23 +64,7 @@
     if (cur && (await ask(t('room.skipConfirm', { title: cur.title }), { danger: true })))
       act(() => api('POST', `/api/rooms/${roomId}/skip`, { itemId: cur.id }))
   }
-  function moreControls() {
-    const p = room?.player
-    if (!p) return
-    sheet(
-      t('room.moreControls'),
-      [
-        ...(room?.current?.hasOriginal
-          ? [{ label: `🎤 ${p.vocal ? t('room.vocalSwitchOff') : t('room.vocalSwitchOn')}`, run: () => control('vocal', p.vocal ? 0 : 1) }]
-          : []),
-        { label: `🔊 ${t('room.volumeUp')}`, disabled: p.volume >= 100, run: () => control('volume', Math.min(100, p.volume + 10)) },
-        { label: `🔉 ${t('room.volumeDown')}`, disabled: p.volume <= 0, run: () => control('volume', Math.max(0, p.volume - 10)) },
-        { label: `▦ ${p.showQR ? t('room.qrHide') : t('room.qrShow')}`, run: () => control('qr', p.showQR ? 0 : 1) },
-        ...keyActions(p.key, control),
-      ],
-      `${t('room.volumeNow', { n: p.volume })} · ${keyLabel(p.key)}`,
-    )
-  }
+  const moreControls = () => openPlayerControls(() => room, control)
 
   // ---- queue ----
   const move = (itemId: number, index: number) => act(() => api('POST', `${base}/move`, { itemId, index }))
